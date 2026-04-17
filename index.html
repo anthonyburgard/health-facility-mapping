@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Raster Viewer</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H"
+      crossorigin="anonymous"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <h1>Raster + Vector Viewer</h1>
+        <p class="hint">
+          Push geospatial files to <code>data/</code> in this repo, then refresh this page.
+        </p>
+        <div id="repo-meta" class="meta"></div>
+        <div class="controls">
+          <button id="load-all" type="button">Load All</button>
+          <button id="zoom-loaded" type="button">Zoom Loaded</button>
+          <button id="clear-map" type="button" class="ghost">Clear Map</button>
+        </div>
+        <ul id="file-list" class="file-list"></ul>
+        <p id="status" class="status" aria-live="polite"></p>
+      </aside>
+      <main class="map-wrap">
+        <div id="map" role="region" aria-label="Map"></div>
+      </main>
+    </div>
+
+    <script>
+      window.GEO_VIEWER_CONFIG = {
+        repo: null,
+        branch: null,
+        dataRoot: "data",
+      };
+    </script>
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"
+      crossorigin="anonymous"
+      defer
+    ></script>
+    <script
+      src="https://unpkg.com/leaflet-omnivore@0.3.4/leaflet-omnivore.min.js"
+      integrity="sha384-iSbZ0u+krSsBvNi0nBcb2hAdkZkoY5HVYY/bPow5MvY9yWGAmXSpZJ3rt2Run9rK"
+      crossorigin="anonymous"
+      defer
+    ></script>
+    <script
+      src="https://unpkg.com/georaster@1.6.0/dist/georaster.browser.bundle.min.js"
+      integrity="sha384-k/E847ELHPuDVPWoArQHQe5LUD8YSFwxlUaH63fF618o/Y0Gnu4FQ1xjuL280spp"
+      crossorigin="anonymous"
+      defer
+    ></script>
+    <script
+      src="https://unpkg.com/georaster-layer-for-leaflet@4.1.2/dist/v3/webpack/bundle/georaster-layer-for-leaflet.min.js"
+      integrity="sha384-sXMU6o9L7Id0sHhKXTqvWUlKNHnQYz4oa4eCeNk61Cf7UY8NyK1G7A3g/mF4nBPO"
+      crossorigin="anonymous"
+      defer
+    ></script>
+    <script
+      src="https://unpkg.com/topojson-client@3.1.0/dist/topojson-client.min.js"
+      integrity="sha384-Ukv1p/xTma6P4/2bY5KzWBw+ydSpXmhCMtyciIQVDJ1RmOxtCYNMF1uXT9T63H67"
+      crossorigin="anonymous"
+      defer
+    ></script>
+    <script
+      src="https://unpkg.com/shpjs@6.2.0/dist/shp.js"
+      integrity="sha384-H+FfmRuvwpUgbk57oaE8X8JrkO8eMkd0Hjfd5zouea2lCSZdbjSBKTPqzBNWdIDE"
+      crossorigin="anonymous"
+      defer
+    ></script>
+    <script src="./app.js" defer></script>
+  </body>
+</html>
