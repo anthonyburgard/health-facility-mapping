@@ -206,7 +206,8 @@ function updateDashboard() {
       const rendered = map.queryRenderedFeatures(undefined, { layers: l.layerIds.filter(id => map.getLayer(id)) });
       const seen = new Set();
       rendered.forEach(f => {
-        const key = f.id ?? JSON.stringify(f.properties);
+        const coords = f.geometry?.coordinates;
+        const key = f.id != null ? f.id : `${coords}-${JSON.stringify(f.properties)}`;
         if (!seen.has(key)) { seen.add(key); features.push(f); }
       });
     }
