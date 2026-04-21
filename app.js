@@ -565,7 +565,8 @@ function removeLayer(layer) {
 }
 
 // ── Load PMTiles ───────────────────────────────────────────────────────────
-async function loadPMTiles(url, name) {
+async function loadPMTiles(url, name, opts = {}) {
+  const { skipFit = false, skipTabSwitch = false } = opts;
   showLoading(`Loading ${name}…`);
 
   let pmUrl = url;
@@ -635,7 +636,7 @@ async function loadPMTiles(url, name) {
       [header.minLon, header.minLat],
       [header.maxLon, header.maxLat],
     ];
-    if (header.minLon !== 0 || header.maxLon !== 0) {
+    if (!skipFit && (header.minLon !== 0 || header.maxLon !== 0)) {
       map.fitBounds(bounds, { padding: 40, duration: 800 });
     }
 
@@ -644,7 +645,7 @@ async function loadPMTiles(url, name) {
     renderLayers();
     hideLoading();
     updateDashboard();
-    switchTab("layers");
+    if (!skipTabSwitch) switchTab("layers");
 
     if (type === "vector") {
       layerIds.filter(lid => lid.includes("_fill_") || lid.includes("_circle_")).forEach(lid => {
@@ -830,6 +831,13 @@ function loadGeoJSON(geojson, name) {
   }
 }
 
+// ── Default layers (auto-loaded on startup) ────────────────────────────────
+const DEFAULT_LAYERS = [
+  { name: "HDX",          url: "https://pub-1cfa3599913b47b1874de595f1cf952a.r2.dev/regional_hdx.pmtiles" },
+  { name: "Healthsites",  url: "https://pub-1cfa3599913b47b1874de595f1cf952a.r2.dev/regional_healthsites.pmtiles" },
+  { name: "Overture",     url: "https://pub-1cfa3599913b47b1874de595f1cf952a.r2.dev/regional_overture.pmtiles" },
+];
+
 // ── Country highlight layers ───────────────────────────────────────────────
 map.on("load", () => {
   map.addSource("country-highlight", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
@@ -838,4 +846,6 @@ map.on("load", () => {
   map.addLayer({ id: "country-highlight-line", type: "line", source: "country-highlight",
     paint: { "line-color": "#1a6fba", "line-width": 2, "line-opacity": 0.7,
              "line-dasharray": [3, 2] } });
+
+  DEFAULT_LAYERS.forEach(l => loadPMTiles(l.url, l.name, { skipFit: true, skipTabSwitch: true }));
 });
