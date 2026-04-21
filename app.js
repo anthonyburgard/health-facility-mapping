@@ -27,6 +27,7 @@ let layers = [];
 let layerCounter = 0;
 let inspectEnabled = true;
 let vectorOpacity = 1;
+let selectedCountry = null;
 
 // ── Tabs ───────────────────────────────────────────────────────────────────
 function switchTab(tab) {
@@ -152,10 +153,12 @@ COUNTRIES.forEach(c => {
 
 sel.addEventListener("change", async () => {
   const c = COUNTRIES.find(x => x.name === sel.value);
+  selectedCountry = c || null;
   if (!c) {
     if (map.getSource("country-highlight")) {
       map.getSource("country-highlight").setData({ type: "FeatureCollection", features: [] });
     }
+    updateDashboard();
     return;
   }
   map.fitBounds([[c.bbox[0], c.bbox[1]], [c.bbox[2], c.bbox[3]]], { padding: 40, duration: 900, maxZoom: 12 });
@@ -184,17 +187,20 @@ function updateDashboard() {
     body.innerHTML = `<div class="dash-empty">Load a layer to see stats</div>`;
     return;
   }
-  const bounds = map.getBounds();
 
-  const layerData = layers.slice().reverse().map(l => {
+  const bbox = selectedCountry?.bbox ?? null;
+  const mapBounds = map.getBounds();
+
+  const inBounds = ([lng, lat]) => bbox
+    ? lng >= bbox[0] && lng <= bbox[2] && lat >= bbox[1] && lat <= bbox[3]
+    : mapBounds.contains([lng, lat]);
+
+  const layerData = layers.filter(l => l.visible && l.type !== "raster").map(l => {
     let features = [];
     if (l.type === "geojson") {
       const src = map.getSource(l.sourceId);
-      if (src && src._data && src._data.features) {
-        features = src._data.features.filter(f => {
-          if (!f.geometry) return false;
-          return flatCoords(f.geometry).some(([lng, lat]) => bounds.contains([lng, lat]));
-        });
+      if (src?._data?.features) {
+        features = src._data.features.filter(f => f.geometry && flatCoords(f.geometry).some(inBounds));
       }
     } else if (l.type === "vector") {
       const rendered = map.queryRenderedFeatures(undefined, { layers: l.layerIds.filter(id => map.getLayer(id)) });
@@ -204,57 +210,54 @@ function updateDashboard() {
         if (!seen.has(key)) { seen.add(key); features.push(f); }
       });
     }
+    // Exclude hidden categories from count
+    if (l.style?.categorizeBy && l.hiddenCategories?.size > 0) {
+      const prop = l.style.categorizeBy;
+      features = features.filter(f => !l.hiddenCategories.has(String((f.properties ?? {})[prop] ?? "—")));
+    }
     return { layer: l, features };
   });
 
-  body.innerHTML = layerData.map(({ layer: l, features }) => {
-    if (l.type === "raster") {
-      return `<div class="dash-row">
-        <span class="dash-name" title="${l.name}">${l.name}</span>
-        <div class="dash-bar-wrap"><div class="dash-bar dash-raster-bar" style="width:100%"></div></div>
-        <span class="dash-count">${l.visible ? "visible" : "hidden"}</span>
-      </div>`;
-    }
+  const grandTotal = layerData.reduce((s, { features }) => s + features.length, 0);
+  const scope = selectedCountry ? `in ${selectedCountry.name}` : "in view";
 
-    const total = features.length;
-    const shortName = l.name.length > 18 ? l.name.slice(0, 16) + "…" : l.name;
+  let html = `<div class="dash-total">
+    ${grandTotal.toLocaleString()}
+    <span class="dash-total-label">${scope}</span>
+  </div>`;
 
-    if (l.style?.categorizeBy && l.style?.categoryColors && total > 0) {
-      const prop = l.style.categorizeBy;
-      const colorMap = l.style.categoryColors;
-      const catCounts = {};
-      features.forEach(f => {
-        const val = String((f.properties || {})[prop] ?? "—");
-        catCounts[val] = (catCounts[val] || 0) + 1;
-      });
-      const maxCat = Math.max(1, ...Object.values(catCounts));
-      const catRows = Object.entries(colorMap)
-        .filter(([val]) => catCounts[val] > 0)
-        .sort(([a], [b]) => (catCounts[b] || 0) - (catCounts[a] || 0))
-        .map(([val, color]) => {
-          const cnt = catCounts[val] || 0;
-          const pct = Math.round((cnt / maxCat) * 100);
-          return `<div class="dash-cat-row">
-            <span class="dash-cat-swatch" style="background:${color}"></span>
-            <span class="dash-cat-label" title="${val}">${val}</span>
-            <div class="dash-cat-bar-wrap"><div class="dash-cat-bar" style="width:${pct}%;background:${color}"></div></div>
-            <span class="dash-count">${cnt}</span>
-          </div>`;
-        }).join("");
-      return `<div class="dash-layer-header">
-          <span class="dash-name" title="${l.name}">${shortName}</span>
-          <span class="dash-count">${total.toLocaleString()} total</span>
-        </div>
-        <div class="dash-cat-list">${catRows}</div>`;
-    }
-
-    return `<div class="dash-row">
+  layerData.forEach(({ layer: l, features }) => {
+    const count = features.length;
+    const shortName = l.name.length > 20 ? l.name.slice(0, 18) + "…" : l.name;
+    html += `<div class="dash-row">
       <span class="dash-name" title="${l.name}">${shortName}</span>
-      <div class="dash-bar-wrap"><div class="dash-bar ${l.type==='geojson'?'dash-geojson-bar':''}" style="width:100%"></div></div>
-      <span class="dash-count">${total.toLocaleString()}</span>
+      <span class="dash-count">${count.toLocaleString()}</span>
     </div>`;
-  }).join("");
+
+    if (l.style?.categorizeBy && l.style?.categoryColors) {
+      const colorMap = l.style.categoryColors;
+      const hidden = l.hiddenCategories ?? new Set();
+      const pills = Object.entries(colorMap).map(([val, color]) =>
+        `<button class="cat-pill${hidden.has(val) ? " off" : ""}" data-layer="${l.id}" data-val="${CSS.escape ? val : val.replace(/"/g, '&quot;')}" style="--pill-color:${color}">${val}</button>`
+      ).join("");
+      html += `<div class="cat-pills">${pills}</div>`;
+    }
+  });
+
+  body.innerHTML = html;
 }
+
+document.getElementById("dashboard-body").addEventListener("click", e => {
+  const pill = e.target.closest(".cat-pill");
+  if (!pill) return;
+  const layer = layers.find(l => l.id === pill.dataset.layer);
+  if (!layer) return;
+  const val = pill.dataset.val;
+  if (layer.hiddenCategories.has(val)) layer.hiddenCategories.delete(val);
+  else layer.hiddenCategories.add(val);
+  applyLayerFilter(layer);
+  updateDashboard();
+});
 
 function flatCoords(geom) {
   const out = [];
@@ -332,10 +335,25 @@ function applyCategorization(layer) {
   });
 }
 
+function applyLayerFilter(layer) {
+  if (!layer.style?.categorizeBy) return;
+  const prop = layer.style.categorizeBy;
+  const hidden = [...(layer.hiddenCategories ?? [])];
+  layer.layerIds.forEach(lid => {
+    if (!map.getLayer(lid)) return;
+    const base = layer._baseFilters?.[lid] ?? null;
+    const hideFilter = hidden.length > 0 ? ["!", ["in", ["get", prop], ["literal", hidden]]] : null;
+    const combined = base && hideFilter ? ["all", base, hideFilter] : hideFilter ?? base ?? null;
+    map.setFilter(lid, combined);
+  });
+}
+
 function setCategorizeBy(layer, prop) {
   if (!prop) {
     layer.style.categorizeBy = null;
     layer.style.categoryColors = null;
+    layer.hiddenCategories = new Set();
+    applyLayerFilter(layer);
     applyLayerStyle(layer);
     renderLayers();
     return;
@@ -349,7 +367,9 @@ function setCategorizeBy(layer, prop) {
   layer.style.categorizeBy = prop;
   layer.style.categoryColors = colorMap;
   layer.style.catValueCounts = Object.fromEntries(valMap);
+  layer.hiddenCategories = new Set();
   applyCategorization(layer);
+  applyLayerFilter(layer);
   renderLayers();
 }
 
@@ -639,7 +659,9 @@ async function loadPMTiles(url, name, opts = {}) {
       map.fitBounds(bounds, { padding: 40, duration: 800 });
     }
 
-    const layer = { id, name, url: pmUrl, type, visible: true, sourceId, layerIds, sublayerCount, sublayerNames, style };
+    const _baseFilters = {};
+    layerIds.forEach(lid => { if (map.getLayer(lid)?.filter) _baseFilters[lid] = map.getLayer(lid).filter; });
+    const layer = { id, name, url: pmUrl, type, visible: true, sourceId, layerIds, sublayerCount, sublayerNames, style, hiddenCategories: new Set(), _baseFilters };
     layers.push(layer);
     renderLayers();
     hideLoading();
@@ -812,7 +834,9 @@ function loadGeoJSON(geojson, name) {
       }
     } catch (_) {}
 
-    const layer = { id, name, type: "geojson", visible: true, sourceId, layerIds, sublayerCount: featureCount, sublayerNames: [], style, _geojsonData: geojson };
+    const _baseFilters = {};
+    [fillId, lineId, circleId].forEach(lid => { if (map.getLayer(lid)?.filter) _baseFilters[lid] = map.getLayer(lid).filter; });
+    const layer = { id, name, type: "geojson", visible: true, sourceId, layerIds, sublayerCount: featureCount, sublayerNames: [], style, hiddenCategories: new Set(), _baseFilters, _geojsonData: geojson };
     layers.push(layer);
     renderLayers();
     hideLoading();
