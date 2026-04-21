@@ -1,971 +1,841 @@
-const CONFIG_DEFAULTS = Object.freeze({
-  repo: null,
-  branch: null,
-  dataRoot: "data",
-  autoLoadLimit: 4,
-  autoLoadMaxBytes: 25 * 1024 * 1024,
-});
+// ── PMTiles protocol registration ──────────────────────────────────────────
+const protocol = new pmtiles.Protocol();
+maplibregl.addProtocol("pmtiles", protocol.tile);
 
-const VECTOR_EXTENSIONS = new Set([
-  "geojson",
-  "json",
-  "topojson",
-  "kml",
-  "gpx",
-  "csv",
-  "wkt",
-  "zip",
-]);
-const RASTER_EXTENSIONS = new Set(["tif", "tiff"]);
-
-const state = {
-  map: null,
-  entries: [],
-  repoContext: null,
+// ── Basemaps ───────────────────────────────────────────────────────────────
+const BASEMAPS = {
+  positron: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+  dark:     "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+  osm:      "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
+  topo:     "https://demotiles.maplibre.org/style.json",
 };
 
-document.addEventListener("DOMContentLoaded", () => {
-  void init();
+// ── Map init ───────────────────────────────────────────────────────────────
+const map = new maplibregl.Map({
+  container: "map",
+  style: BASEMAPS.positron,
+  center: [0, 20],
+  zoom: 2,
+  attributionControl: { compact: true },
 });
 
-async function init() {
-  state.map = createMap();
-  bindControls();
+map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "top-right");
+map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-left");
 
-  const config = readConfig();
-  setStatus("Discovering files...");
+// ── State ──────────────────────────────────────────────────────────────────
+let layers = [];
+let layerCounter = 0;
+let inspectEnabled = true;
+let vectorOpacity = 1;
+
+// ── Tabs ───────────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
+  document.querySelectorAll(".tab-pane").forEach(p => p.classList.toggle("active", p.id === `tab-${tab}`));
+  if (tab === "viewer") updateDashboard();
+}
+document.getElementById("tab-bar").addEventListener("click", e => {
+  const btn = e.target.closest(".tab-btn");
+  if (!btn) return;
+  switchTab(btn.dataset.tab);
+});
+
+// ── Sidebar toggle ─────────────────────────────────────────────────────────
+const sidebarToggle = document.getElementById("sidebar-toggle");
+const sidebar = document.getElementById("sidebar");
+sidebarToggle.addEventListener("click", () => {
+  const collapsed = sidebar.classList.toggle("collapsed");
+  sidebarToggle.textContent = collapsed ? "‹" : "›";
+  sidebarToggle.style.left = collapsed ? "0" : "var(--panel-w)";
+  setTimeout(() => map.resize(), 260);
+});
+
+// ── Coords bar ─────────────────────────────────────────────────────────────
+map.on("mousemove", e => {
+  document.getElementById("coords-lng").textContent = `Lng: ${e.lngLat.lng.toFixed(5)}`;
+  document.getElementById("coords-lat").textContent = `Lat: ${e.lngLat.lat.toFixed(5)}`;
+});
+map.on("zoom", () => {
+  document.getElementById("coords-zoom").textContent = `Zoom: ${map.getZoom().toFixed(1)}`;
+});
+map.on("load", () => {
+  document.getElementById("coords-zoom").textContent = `Zoom: ${map.getZoom().toFixed(1)}`;
+});
+
+// ── Close feature popup on map background click ────────────────────────────
+map.on("click", e => {
+  const features = map.queryRenderedFeatures(e.point);
+  const userFeature = features.some(f => layers.some(l => l.layerIds.includes(f.layer.id)));
+  if (!userFeature) document.getElementById("feature-panel").classList.remove("visible");
+});
+
+// ── Toast helpers ──────────────────────────────────────────────────────────
+let loadingTimer;
+function showLoading(msg = "Loading…") {
+  const t = document.getElementById("loading-toast");
+  t.textContent = msg;
+  t.classList.add("show");
+}
+function hideLoading() {
+  document.getElementById("loading-toast").classList.remove("show");
+}
+function showError(msg, duration = 4000) {
+  const t = document.getElementById("error-toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(loadingTimer);
+  loadingTimer = setTimeout(() => t.classList.remove("show"), duration);
+  hideLoading();
+}
+
+// ── Country bounding boxes ─────────────────────────────────────────────────
+const COUNTRIES = [
+  { name: "Afghanistan",                    bbox: [60.5, 29.4, 75.0, 38.5] },
+  { name: "Armenia",                        bbox: [43.4, 38.8, 46.6, 41.3] },
+  { name: "Australia",                      bbox: [113.3, -43.6, 153.6, -10.7] },
+  { name: "Azerbaijan",                     bbox: [44.8, 38.4, 50.4, 41.9] },
+  { name: "Bangladesh",                     bbox: [88.0, 20.7, 92.7, 26.6] },
+  { name: "Bhutan",                         bbox: [88.7, 26.7, 92.1, 28.3] },
+  { name: "Brunei Darussalam",              bbox: [114.1, 4.0, 115.4, 5.1] },
+  { name: "Cambodia",                       bbox: [102.3, 10.4, 107.6, 14.7] },
+  { name: "China",                          bbox: [73.5, 18.2, 134.8, 53.6] },
+  { name: "Cook Islands",                   bbox: [-166.0, -21.9, -157.3, -8.9] },
+  { name: "Federated States of Micronesia", bbox: [137.4, 0.9, 163.1, 10.1] },
+  { name: "Fiji",                           bbox: [177.1, -19.2, 180.0, -16.0] },
+  { name: "Georgia",                        bbox: [40.0, 41.1, 46.7, 43.6] },
+  { name: "Hong Kong",                      bbox: [113.8, 22.1, 114.4, 22.6] },
+  { name: "India",                          bbox: [68.1, 8.0, 97.4, 37.1] },
+  { name: "Indonesia",                      bbox: [95.0, -10.9, 141.0, 5.9] },
+  { name: "Japan",                          bbox: [129.4, 31.0, 145.8, 45.5] },
+  { name: "Kazakhstan",                     bbox: [50.3, 40.6, 87.3, 55.4] },
+  { name: "Kiribati",                       bbox: [172.9, -4.7, 180.0, 4.7] },
+  { name: "Kyrgyz Republic",                bbox: [69.3, 39.2, 80.3, 43.2] },
+  { name: "Lao PDR",                        bbox: [100.1, 13.9, 107.6, 22.5] },
+  { name: "Malaysia",                       bbox: [99.6, 0.9, 119.3, 7.4] },
+  { name: "Maldives",                       bbox: [72.6, -0.7, 73.8, 7.1] },
+  { name: "Marshall Islands",               bbox: [160.8, 4.6, 172.0, 14.6] },
+  { name: "Mongolia",                       bbox: [87.8, 41.6, 119.9, 52.1] },
+  { name: "Myanmar",                        bbox: [92.2, 9.8, 101.2, 28.5] },
+  { name: "Nauru",                          bbox: [166.9, -0.55, 167.0, -0.40] },
+  { name: "Nepal",                          bbox: [80.1, 26.4, 88.2, 30.4] },
+  { name: "New Zealand",                    bbox: [165.9, -47.3, 178.6, -34.4] },
+  { name: "Niue",                           bbox: [-170.1, -19.2, -169.8, -18.9] },
+  { name: "Pakistan",                       bbox: [60.9, 23.6, 77.8, 37.1] },
+  { name: "Palau",                          bbox: [134.1, 2.8, 134.7, 8.1] },
+  { name: "Papua New Guinea",               bbox: [141.0, -10.7, 155.6, -1.3] },
+  { name: "Philippines",                    bbox: [116.9, 4.6, 126.6, 20.9] },
+  { name: "Republic of Korea",              bbox: [126.1, 34.0, 129.6, 38.6] },
+  { name: "Samoa",                          bbox: [-172.8, -14.1, -171.4, -13.4] },
+  { name: "Singapore",                      bbox: [103.6, 1.2, 104.0, 1.5] },
+  { name: "Solomon Islands",                bbox: [155.5, -10.8, 162.7, -6.6] },
+  { name: "Sri Lanka",                      bbox: [79.7, 5.9, 81.9, 9.8] },
+  { name: "Taipei, China",                  bbox: [120.0, 21.9, 122.0, 25.3] },
+  { name: "Tajikistan",                     bbox: [67.4, 36.7, 75.2, 40.8] },
+  { name: "Thailand",                       bbox: [97.3, 5.6, 105.7, 20.5] },
+  { name: "Timor-Leste",                    bbox: [124.0, -9.5, 127.3, -8.1] },
+  { name: "Tonga",                          bbox: [-176.2, -22.3, -173.9, -15.6] },
+  { name: "Türkiye",                        bbox: [25.7, 35.8, 44.8, 42.1] },
+  { name: "Turkmenistan",                   bbox: [52.4, 35.1, 66.7, 42.8] },
+  { name: "Tuvalu",                         bbox: [176.1, -9.4, 179.9, -5.7] },
+  { name: "Uzbekistan",                     bbox: [55.9, 37.2, 73.2, 45.6] },
+  { name: "Vanuatu",                        bbox: [166.5, -20.2, 170.2, -13.1] },
+  { name: "Viet Nam",                       bbox: [102.1, 8.6, 109.5, 23.4] },
+];
+
+const sel = document.getElementById("country-select");
+COUNTRIES.forEach(c => {
+  const opt = document.createElement("option");
+  opt.value = c.name;
+  opt.textContent = c.name;
+  sel.appendChild(opt);
+});
+
+sel.addEventListener("change", async () => {
+  const c = COUNTRIES.find(x => x.name === sel.value);
+  if (!c) {
+    if (map.getSource("country-highlight")) {
+      map.getSource("country-highlight").setData({ type: "FeatureCollection", features: [] });
+    }
+    return;
+  }
+  map.fitBounds([[c.bbox[0], c.bbox[1]], [c.bbox[2], c.bbox[3]]], { padding: 40, duration: 900, maxZoom: 12 });
+  map.once("moveend", updateDashboard);
 
   try {
-    const discovery = await discoverEntries(config);
-    state.repoContext = discovery.repoContext;
-    renderRepoMeta(discovery.repoContext, config.dataRoot, discovery.source);
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(c.name)}&polygon_geojson=1&format=json&limit=1&featuretype=country`,
+      { headers: { "Accept-Language": "en" } }
+    );
+    const data = await res.json();
+    const geom = data[0]?.geojson;
+    if (geom && map.getSource("country-highlight")) {
+      map.getSource("country-highlight").setData({
+        type: "FeatureCollection",
+        features: [{ type: "Feature", geometry: geom, properties: {} }]
+      });
+    }
+  } catch (_) { /* silently skip if offline */ }
+});
 
-    const entries = discovery.entries;
-    state.entries = entries;
-    renderFileList(entries);
+// ── Dashboard ──────────────────────────────────────────────────────────────
+function updateDashboard() {
+  const body = document.getElementById("dashboard-body");
+  if (layers.length === 0) {
+    body.innerHTML = `<div class="dash-empty">Load a layer to see stats</div>`;
+    return;
+  }
+  const bounds = map.getBounds();
 
-    if (entries.length === 0) {
-      setStatus(`No supported files were found in "${config.dataRoot}/".`, "error");
-      return;
+  const layerData = layers.slice().reverse().map(l => {
+    let features = [];
+    if (l.type === "geojson") {
+      const src = map.getSource(l.sourceId);
+      if (src && src._data && src._data.features) {
+        features = src._data.features.filter(f => {
+          if (!f.geometry) return false;
+          return flatCoords(f.geometry).some(([lng, lat]) => bounds.contains([lng, lat]));
+        });
+      }
+    } else if (l.type === "vector") {
+      const rendered = map.queryRenderedFeatures(undefined, { layers: l.layerIds.filter(id => map.getLayer(id)) });
+      const seen = new Set();
+      rendered.forEach(f => {
+        const key = f.id ?? JSON.stringify(f.properties);
+        if (!seen.has(key)) { seen.add(key); features.push(f); }
+      });
+    }
+    return { layer: l, features };
+  });
+
+  body.innerHTML = layerData.map(({ layer: l, features }) => {
+    if (l.type === "raster") {
+      return `<div class="dash-row">
+        <span class="dash-name" title="${l.name}">${l.name}</span>
+        <div class="dash-bar-wrap"><div class="dash-bar dash-raster-bar" style="width:100%"></div></div>
+        <span class="dash-count">${l.visible ? "visible" : "hidden"}</span>
+      </div>`;
     }
 
-    setStatus(`Found ${entries.length} file(s).`, "ok");
+    const total = features.length;
+    const shortName = l.name.length > 18 ? l.name.slice(0, 16) + "…" : l.name;
 
-    const autoLoadEntries = entries
-      .filter((entry) => entry.size <= CONFIG_DEFAULTS.autoLoadMaxBytes)
-      .slice(0, CONFIG_DEFAULTS.autoLoadLimit);
-    if (autoLoadEntries.length > 0) {
-      setStatus(`Auto-loading ${autoLoadEntries.length} file(s)...`);
-      await loadEntries(autoLoadEntries, true);
+    if (l.style?.categorizeBy && l.style?.categoryColors && total > 0) {
+      const prop = l.style.categorizeBy;
+      const colorMap = l.style.categoryColors;
+      const catCounts = {};
+      features.forEach(f => {
+        const val = String((f.properties || {})[prop] ?? "—");
+        catCounts[val] = (catCounts[val] || 0) + 1;
+      });
+      const maxCat = Math.max(1, ...Object.values(catCounts));
+      const catRows = Object.entries(colorMap)
+        .filter(([val]) => catCounts[val] > 0)
+        .sort(([a], [b]) => (catCounts[b] || 0) - (catCounts[a] || 0))
+        .map(([val, color]) => {
+          const cnt = catCounts[val] || 0;
+          const pct = Math.round((cnt / maxCat) * 100);
+          return `<div class="dash-cat-row">
+            <span class="dash-cat-swatch" style="background:${color}"></span>
+            <span class="dash-cat-label" title="${val}">${val}</span>
+            <div class="dash-cat-bar-wrap"><div class="dash-cat-bar" style="width:${pct}%;background:${color}"></div></div>
+            <span class="dash-count">${cnt}</span>
+          </div>`;
+        }).join("");
+      return `<div class="dash-layer-header">
+          <span class="dash-name" title="${l.name}">${shortName}</span>
+          <span class="dash-count">${total.toLocaleString()} total</span>
+        </div>
+        <div class="dash-cat-list">${catRows}</div>`;
+    }
+
+    return `<div class="dash-row">
+      <span class="dash-name" title="${l.name}">${shortName}</span>
+      <div class="dash-bar-wrap"><div class="dash-bar ${l.type==='geojson'?'dash-geojson-bar':''}" style="width:100%"></div></div>
+      <span class="dash-count">${total.toLocaleString()}</span>
+    </div>`;
+  }).join("");
+}
+
+function flatCoords(geom) {
+  const out = [];
+  const walk = c => Array.isArray(c[0]) ? c.forEach(walk) : out.push(c);
+  walk(geom.coordinates || []);
+  return out;
+}
+
+map.on("moveend", updateDashboard);
+
+// ── Categorization helpers ─────────────────────────────────────────────────
+const CAT_PALETTE = [
+  "#4e79a7","#f28e2b","#e15759","#76b7b2","#59a14f",
+  "#edc948","#b07aa1","#ff9da7","#9c755f","#bab0ac",
+  "#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
+  "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf",
+];
+const MAX_CATS = 20;
+
+function getLayerProperties(layer) {
+  const props = {};
+  const collect = feature => {
+    if (!feature.properties) return;
+    Object.entries(feature.properties).forEach(([k, v]) => {
+      if (v === null || v === undefined) return;
+      if (!props[k]) props[k] = new Map();
+      const s = String(v);
+      props[k].set(s, (props[k].get(s) || 0) + 1);
+    });
+  };
+  if (layer.type === "geojson" && layer._geojsonData) {
+    (layer._geojsonData.features || []).forEach(collect);
+  } else if (layer.type === "vector") {
+    const ids = layer.layerIds.filter(id => map.getLayer(id));
+    map.queryRenderedFeatures(undefined, { layers: ids }).forEach(collect);
+  }
+  return Object.fromEntries(
+    Object.entries(props).filter(([, m]) => m.size >= 2 && m.size <= MAX_CATS)
+  );
+}
+
+function buildMatchExpr(prop, colorMap, fallback) {
+  const expr = ["match", ["get", prop]];
+  Object.entries(colorMap).forEach(([val, color]) => { expr.push(val, color); });
+  expr.push(fallback);
+  return expr;
+}
+
+function applyCategorization(layer) {
+  const s = layer.style;
+  if (!s.categorizeBy || !s.categoryColors) {
+    applyLayerStyle(layer);
+    return;
+  }
+  const prop = s.categorizeBy;
+  const colorMap = s.categoryColors;
+  const fallback = "#cccccc";
+  const matchExpr = buildMatchExpr(prop, colorMap, fallback);
+
+  layer.layerIds.forEach(lid => {
+    if (!map.getLayer(lid)) return;
+    const t = map.getLayer(lid).type;
+    if (t === "fill") {
+      map.setPaintProperty(lid, "fill-color", matchExpr);
+      map.setPaintProperty(lid, "fill-opacity", s.fillOpacity);
+    } else if (t === "line") {
+      map.setPaintProperty(lid, "line-color", matchExpr);
+      map.setPaintProperty(lid, "line-width", s.strokeWidth);
+      map.setPaintProperty(lid, "line-opacity", s.opacity);
+    } else if (t === "circle") {
+      map.setPaintProperty(lid, "circle-color", matchExpr);
+      map.setPaintProperty(lid, "circle-radius", s.pointRadius);
+      map.setPaintProperty(lid, "circle-opacity", s.opacity);
+    }
+  });
+}
+
+function setCategorizeBy(layer, prop) {
+  if (!prop) {
+    layer.style.categorizeBy = null;
+    layer.style.categoryColors = null;
+    applyLayerStyle(layer);
+    renderLayers();
+    return;
+  }
+  const allProps = getLayerProperties(layer);
+  const valMap = allProps[prop];
+  if (!valMap) return;
+  const colorMap = {};
+  let i = 0;
+  valMap.forEach((count, val) => { colorMap[val] = CAT_PALETTE[i++ % CAT_PALETTE.length]; });
+  layer.style.categorizeBy = prop;
+  layer.style.categoryColors = colorMap;
+  layer.style.catValueCounts = Object.fromEntries(valMap);
+  applyCategorization(layer);
+  renderLayers();
+}
+
+// ── Layer style state ──────────────────────────────────────────────────────
+let activeStyleId = null;
+
+function defaultStyle(hue) {
+  return { color: hslToHex(hue, 65, 50), opacity: 0.85, strokeWidth: 1.5, pointRadius: 5, fillOpacity: 0.35 };
+}
+
+function hslToHex(h, s, l) {
+  s /= 100; l /= 100;
+  const a = s * Math.min(l, 1 - l);
+  const f = n => { const k = (n + h / 30) % 12; const c = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1); return Math.round(255 * c).toString(16).padStart(2, '0'); };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+function applyLayerStyle(layer) {
+  const s = layer.style;
+  layer.layerIds.forEach(lid => {
+    if (!map.getLayer(lid)) return;
+    const t = map.getLayer(lid).type;
+    if (t === 'fill') {
+      map.setPaintProperty(lid, 'fill-color', s.color);
+      map.setPaintProperty(lid, 'fill-opacity', s.fillOpacity);
+    } else if (t === 'line') {
+      map.setPaintProperty(lid, 'line-color', s.color);
+      map.setPaintProperty(lid, 'line-opacity', s.opacity);
+      map.setPaintProperty(lid, 'line-width', s.strokeWidth);
+    } else if (t === 'circle') {
+      map.setPaintProperty(lid, 'circle-color', s.color);
+      map.setPaintProperty(lid, 'circle-opacity', s.opacity);
+      map.setPaintProperty(lid, 'circle-radius', s.pointRadius);
+      map.setPaintProperty(lid, 'circle-stroke-color', 'white');
+      map.setPaintProperty(lid, 'circle-stroke-width', 1.5);
+    } else if (t === 'raster') {
+      map.setPaintProperty(lid, 'raster-opacity', s.opacity);
+    }
+  });
+}
+
+// ── Render sidebar layers ──────────────────────────────────────────────────
+function renderLayers() {
+  const sec = document.getElementById("layers-section");
+  if (layers.length === 0) {
+    sec.innerHTML = `<div id="empty-state">No layers loaded.<br>Drop a file or enter a URL above.</div>`;
+    return;
+  }
+  sec.innerHTML = `<div class="section-label">Layers</div>` + layers.slice().reverse().map(l => {
+    const s = l.style || {};
+    const isOpen = activeStyleId === l.id;
+    const metaText = l.type === 'geojson'
+      ? (l.sublayerCount + " feature" + (l.sublayerCount !== 1 ? "s" : ""))
+      : (l.sublayerCount ? l.sublayerCount + " sublayer" + (l.sublayerCount>1?"s":"") : "loading…");
+
+    let editorRows = '';
+    if (l.type !== 'raster') {
+      const allProps = activeStyleId === l.id ? getLayerProperties(l) : {};
+      const propNames = Object.keys(allProps);
+      const curCat = l.style?.categorizeBy || '';
+      const catOptions = [`<option value="">— solid color —</option>`,
+        ...propNames.map(p => `<option value="${p}" ${p===curCat?'selected':''}>${p}</option>`)
+      ].join('');
+
+      if (!curCat) {
+        editorRows = `
+          <div class="se-row">
+            <span class="se-label">Color</span>
+            <input type="color" class="se-color" data-prop="color" data-id="${l.id}" value="${s.color||'#3b82f6'}">
+            <span class="se-swatch" style="background:${s.color||'#3b82f6'}"></span>
+          </div>
+          <div class="se-row" style="margin-top:4px">
+            <span class="se-label">Categorize</span>
+            <select class="se-select" data-action="categorize" data-id="${l.id}" style="grid-column:2/4">${catOptions}</select>
+          </div>`;
+      } else {
+        const colorMap = l.style.categoryColors || {};
+        const counts = l.style.catValueCounts || {};
+        const catRows = Object.entries(colorMap).map(([val, color]) =>
+          `<div class="cat-edit-row">
+            <input type="color" class="se-color cat-color-inp" data-catid="${l.id}" data-catval="${val}" value="${color}" style="width:28px;height:22px;padding:1px 2px;flex-shrink:0">
+            <span class="cat-label" title="${val}">${val}</span>
+            <span class="cat-count">${counts[val]||''}</span>
+          </div>`
+        ).join('');
+        editorRows = `
+          <div class="se-row">
+            <span class="se-label">Categorize</span>
+            <select class="se-select" data-action="categorize" data-id="${l.id}" style="grid-column:2/4">${catOptions}</select>
+          </div>
+          <div class="cat-edit-list">${catRows}</div>`;
+      }
     } else {
-      const manualOnlyCount = entries.filter(
-        (entry) => entry.size > CONFIG_DEFAULTS.autoLoadMaxBytes
-      ).length;
-      if (manualOnlyCount > 0) {
-        setStatus(
-          `Found ${entries.length} file(s). ${manualOnlyCount} large file(s) require manual Load.`,
-          "ok"
+      editorRows = `
+        <div class="se-row">
+          <span class="se-label">Opacity</span>
+          <input type="range" class="se-range" data-prop="opacity" data-id="${l.id}" min="0" max="1" step="0.05" value="${s.opacity??0.85}">
+          <span class="se-value">${Math.round((s.opacity??0.85)*100)}%</span>
+        </div>`;
+    }
+
+    return `
+    <div class="layer-item" data-id="${l.id}">
+      <div class="layer-vis ${l.visible ? 'on' : ''}" data-action="toggle" data-id="${l.id}">
+        <svg viewBox="0 0 10 8"><polyline points="1,4 4,7 9,1" stroke="white" stroke-width="1.5" fill="none"/></svg>
+      </div>
+      <div class="layer-info">
+        <div class="layer-name" data-action="rename" data-id="${l.id}" title="Double-click to rename">${l.name}</div>
+        <div class="layer-meta">${metaText}</div>
+      </div>
+      <button class="layer-style-btn ${isOpen ? 'active' : ''}" data-action="style" data-id="${l.id}" title="Style">⊙</button>
+      <button class="layer-remove" data-action="remove" data-id="${l.id}" title="Remove">×</button>
+    </div>
+    <div class="style-editor ${isOpen ? 'open' : ''}" data-editor="${l.id}">
+      ${editorRows}
+    </div>`;
+  }).join("");
+}
+
+// ── Layer list interactions ────────────────────────────────────────────────
+document.getElementById("layers-section").addEventListener("dblclick", e => {
+  const el = e.target.closest("[data-action='rename']");
+  if (!el) return;
+  const layer = layers.find(l => l.id === el.dataset.id);
+  if (!layer) return;
+  el.contentEditable = "true";
+  el.focus();
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+
+  const finish = () => {
+    el.contentEditable = "false";
+    const newName = el.textContent.trim();
+    if (newName) { layer.name = newName; el.textContent = newName; }
+    else { el.textContent = layer.name; }
+  };
+  el.addEventListener("keydown", evt => {
+    if (evt.key === "Enter") { evt.preventDefault(); el.blur(); }
+    if (evt.key === "Escape") { el.textContent = layer.name; el.blur(); }
+  }, { once: false });
+  el.addEventListener("blur", finish, { once: true });
+});
+
+document.getElementById("layers-section").addEventListener("click", e => {
+  if (e.target.closest("[data-action='rename']")) return;
+  const el = e.target.closest("[data-action]");
+  if (!el) return;
+  const id = el.dataset.id;
+  const layer = layers.find(l => l.id === id);
+  if (!layer) return;
+  if (el.dataset.action === "toggle") toggleLayer(layer);
+  if (el.dataset.action === "remove") removeLayer(layer);
+  if (el.dataset.action === "style") {
+    activeStyleId = activeStyleId === layer.id ? null : layer.id;
+    renderLayers();
+  }
+});
+
+document.getElementById("layers-section").addEventListener("change", e => {
+  const catSel = e.target.closest("[data-action='categorize']");
+  if (!catSel) return;
+  const layer = layers.find(l => l.id === catSel.dataset.id);
+  if (!layer) return;
+  setCategorizeBy(layer, catSel.value);
+});
+
+document.getElementById("layers-section").addEventListener("input", e => {
+  const catInp = e.target.closest(".cat-color-inp");
+  if (catInp) {
+    const layer = layers.find(l => l.id === catInp.dataset.catid);
+    if (!layer || !layer.style.categoryColors) return;
+    layer.style.categoryColors[catInp.dataset.catval] = catInp.value;
+    applyCategorization(layer);
+    return;
+  }
+
+  const inp = e.target;
+  if (!inp.dataset.prop) return;
+  const layer = layers.find(l => l.id === inp.dataset.id);
+  if (!layer) return;
+  const prop = inp.dataset.prop;
+  const val = inp.type === "range" ? parseFloat(inp.value) : inp.value;
+  layer.style[prop] = val;
+  if (layer.style.categorizeBy) applyCategorization(layer);
+  else applyLayerStyle(layer);
+  const row = inp.closest(".se-row");
+  const valEl = row && row.querySelector(".se-value");
+  const swatchEl = row && row.querySelector(".se-swatch");
+  if (valEl) {
+    if (prop === "opacity" || prop === "fillOpacity") valEl.textContent = Math.round(val * 100) + "%";
+    else if (prop === "strokeWidth" || prop === "pointRadius") valEl.textContent = val + "px";
+  }
+  if (swatchEl && prop === "color") swatchEl.style.background = val;
+});
+
+function toggleLayer(layer) {
+  layer.visible = !layer.visible;
+  layer.layerIds.forEach(lid => {
+    if (map.getLayer(lid)) map.setLayoutProperty(lid, "visibility", layer.visible ? "visible" : "none");
+  });
+  renderLayers();
+}
+
+function removeLayer(layer) {
+  layer.layerIds.forEach(lid => { if (map.getLayer(lid)) map.removeLayer(lid); });
+  if (map.getSource(layer.sourceId)) map.removeSource(layer.sourceId);
+  layers = layers.filter(l => l.id !== layer.id);
+  renderLayers();
+  updateDashboard();
+}
+
+// ── Load PMTiles ───────────────────────────────────────────────────────────
+async function loadPMTiles(url, name) {
+  showLoading(`Loading ${name}…`);
+
+  let pmUrl = url;
+  if (!pmUrl.startsWith("pmtiles://")) pmUrl = "pmtiles://" + url;
+
+  try {
+    const p = new pmtiles.PMTiles(url.replace(/^pmtiles:\/\//, ""));
+    const header = await p.getHeader();
+
+    const type = header.tileType === 1 ? "vector" : "raster";
+    const id = `layer_${++layerCounter}`;
+    const sourceId = `src_${id}`;
+
+    let sublayerCount = 0;
+    let sublayerNames = [];
+    if (type === "vector") {
+      try {
+        const meta = await p.getMetadata();
+        if (meta && meta.vector_layers) {
+          sublayerCount = meta.vector_layers.length;
+          sublayerNames = meta.vector_layers.map(vl => vl.id);
+        }
+      } catch (_) {}
+    }
+
+    if (type === "vector") {
+      map.addSource(sourceId, { type: "vector", url: pmUrl });
+    } else {
+      map.addSource(sourceId, { type: "raster", url: pmUrl, tileSize: 256 });
+    }
+
+    const layerIds = [];
+    const hue = (layerCounter * 67 + 40) % 360;
+    const style = defaultStyle(hue);
+
+    if (type === "raster") {
+      const lid = `${id}_raster`;
+      map.addLayer({
+        id: lid,
+        type: "raster",
+        source: sourceId,
+        paint: { "raster-opacity": vectorOpacity },
+      });
+      layerIds.push(lid);
+      sublayerCount = 1;
+    } else {
+      if (sublayerNames.length === 0) sublayerNames = ["_all"];
+      sublayerNames.forEach((slName, i) => {
+        const subHue = (i * 47 + 210) % 360;
+        const color = `oklch(55% 0.18 ${subHue})`;
+        const fillId = `${id}_fill_${i}`;
+        const lineId = `${id}_line_${i}`;
+        const circleId = `${id}_circle_${i}`;
+
+        const sourceLayer = slName === "_all" ? undefined : slName;
+        const sl = sourceLayer ? { "source-layer": sourceLayer } : {};
+
+        map.addLayer({ id: fillId, type: "fill", source: sourceId, ...sl, paint: { "fill-color": color, "fill-opacity": vectorOpacity * 0.4 }, layout: { visibility: "visible" } });
+        map.addLayer({ id: lineId, type: "line", source: sourceId, ...sl, paint: { "line-color": color, "line-width": 1.5, "line-opacity": vectorOpacity }, layout: { visibility: "visible" } });
+        map.addLayer({ id: circleId, type: "circle", source: sourceId, ...sl, filter: ["==", ["geometry-type"], "Point"], paint: { "circle-color": color, "circle-radius": 4, "circle-opacity": vectorOpacity, "circle-stroke-width": 1, "circle-stroke-color": "white" }, layout: { visibility: "visible" } });
+
+        layerIds.push(fillId, lineId, circleId);
+      });
+    }
+
+    const bounds = [
+      [header.minLon, header.minLat],
+      [header.maxLon, header.maxLat],
+    ];
+    if (header.minLon !== 0 || header.maxLon !== 0) {
+      map.fitBounds(bounds, { padding: 40, duration: 800 });
+    }
+
+    const layer = { id, name, url: pmUrl, type, visible: true, sourceId, layerIds, sublayerCount, sublayerNames, style };
+    layers.push(layer);
+    renderLayers();
+    hideLoading();
+    updateDashboard();
+    switchTab("layers");
+
+    if (type === "vector") {
+      layerIds.filter(lid => lid.includes("_fill_") || lid.includes("_circle_")).forEach(lid => {
+        map.on("click", lid, e => handleFeatureClick(e, name, lid));
+        map.on("mouseenter", lid, () => { map.getCanvas().style.cursor = "pointer"; });
+        map.on("mouseleave", lid, () => { map.getCanvas().style.cursor = ""; });
+      });
+    }
+  } catch (err) {
+    console.error(err);
+    showError(`Failed to load "${name}": ${err.message}`);
+  }
+}
+
+// ── Feature click ──────────────────────────────────────────────────────────
+function handleFeatureClick(e, layerName, layerId) {
+  if (!inspectEnabled) return;
+  const f = e.features && e.features[0];
+  if (!f) return;
+  const props = f.properties || {};
+  const keys = Object.keys(props);
+  if (keys.length === 0) return;
+
+  document.getElementById("feature-layer-name").textContent = layerName;
+  document.getElementById("feature-props").innerHTML = keys.slice(0, 20).map(k =>
+    `<div class="prop-row"><span class="prop-key">${k}</span><span class="prop-val" title="${props[k]}">${props[k]}</span></div>`
+  ).join("");
+  document.getElementById("feature-panel").classList.add("visible");
+}
+
+document.getElementById("feature-close").addEventListener("click", () => {
+  document.getElementById("feature-panel").classList.remove("visible");
+});
+
+// ── Add layer toggle ───────────────────────────────────────────────────────
+function openAddLayer() {
+  document.getElementById("add-layer-body").classList.add("open");
+  const btn = document.getElementById("add-layer-btn");
+  btn.classList.add("open");
+  btn.querySelector(".add-layer-icon").textContent = "−";
+}
+document.getElementById("add-layer-btn").addEventListener("click", () => {
+  const body = document.getElementById("add-layer-body");
+  const btn = document.getElementById("add-layer-btn");
+  const isOpen = body.classList.toggle("open");
+  btn.classList.toggle("open", isOpen);
+  btn.querySelector(".add-layer-icon").textContent = isOpen ? "−" : "⊕";
+});
+
+// ── Drag & drop ────────────────────────────────────────────────────────────
+const dz = document.getElementById("drop-zone");
+dz.addEventListener("click", () => document.getElementById("file-input").click());
+
+document.getElementById("file-input").addEventListener("change", e => {
+  const file = e.target.files[0];
+  if (file) handleFile(file);
+  e.target.value = "";
+});
+
+["dragover","dragenter"].forEach(ev => {
+  dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add("drag-over"); });
+  document.getElementById("map-wrap").addEventListener(ev, e => { e.preventDefault(); });
+});
+["dragleave","drop"].forEach(ev => dz.addEventListener(ev, () => dz.classList.remove("drag-over")));
+
+dz.addEventListener("drop", e => {
+  e.preventDefault();
+  const file = e.dataTransfer.files[0];
+  if (file) handleFile(file);
+});
+
+document.getElementById("map-wrap").addEventListener("drop", e => {
+  e.preventDefault();
+  const file = e.dataTransfer.files[0];
+  if (file) { switchTab("layers"); openAddLayer(); handleFile(file); }
+});
+
+function handleFile(file) {
+  const name = file.name.replace(/\.(pmtiles|geojson|json)$/, "");
+  if (file.name.endsWith(".pmtiles")) {
+    loadPMTiles(URL.createObjectURL(file), name);
+  } else if (file.name.endsWith(".geojson") || file.name.endsWith(".json")) {
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const geojson = JSON.parse(e.target.result);
+        loadGeoJSON(geojson, name);
+      } catch (err) { showError(`Invalid JSON in "${file.name}"`); }
+    };
+    reader.readAsText(file);
+  } else {
+    showError("Unsupported file type. Use .pmtiles, .geojson, or .json");
+  }
+}
+
+// ── URL load ───────────────────────────────────────────────────────────────
+document.getElementById("url-load-btn").addEventListener("click", async () => {
+  let url = document.getElementById("url-input").value.trim();
+  if (!url) return;
+  const raw = url.replace(/^pmtiles:\/\//, "");
+  const name = raw.split("/").pop().replace(/\.(pmtiles|geojson|json)$/, "") || "Layer";
+  if (url.endsWith(".geojson") || url.endsWith(".json")) {
+    showLoading(`Loading ${name}…`);
+    try {
+      const res = await fetch(raw);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const geojson = await res.json();
+      loadGeoJSON(geojson, name);
+    } catch (err) { showError(`Failed to fetch "${name}": ${err.message}`); }
+  } else {
+    loadPMTiles(url, name);
+  }
+  document.getElementById("url-input").value = "";
+});
+document.getElementById("url-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") document.getElementById("url-load-btn").click();
+});
+
+// ── Load GeoJSON ───────────────────────────────────────────────────────────
+function loadGeoJSON(geojson, name) {
+  showLoading(`Loading ${name}…`);
+  try {
+    if (geojson.type === "Feature") geojson = { type: "FeatureCollection", features: [geojson] };
+    if (geojson.type !== "FeatureCollection") throw new Error("Not a valid GeoJSON FeatureCollection or Feature");
+
+    const id = `layer_${++layerCounter}`;
+    const sourceId = `src_${id}`;
+    const hue = (layerCounter * 67 + 40) % 360;
+    const style = defaultStyle(hue);
+    const color = style.color;
+    const featureCount = geojson.features ? geojson.features.length : 0;
+
+    map.addSource(sourceId, { type: "geojson", data: geojson });
+
+    const fillId = `${id}_fill`;
+    const lineId = `${id}_line`;
+    const circleId = `${id}_circle`;
+
+    map.addLayer({ id: fillId, type: "fill", source: sourceId,
+      filter: ["match", ["geometry-type"], ["Polygon","MultiPolygon"], true, false],
+      paint: { "fill-color": color, "fill-opacity": style.fillOpacity } });
+    map.addLayer({ id: lineId, type: "line", source: sourceId,
+      filter: ["match", ["geometry-type"], ["LineString","MultiLineString","Polygon","MultiPolygon"], true, false],
+      paint: { "line-color": color, "line-width": style.strokeWidth, "line-opacity": style.opacity } });
+    map.addLayer({ id: circleId, type: "circle", source: sourceId,
+      filter: ["match", ["geometry-type"], ["Point","MultiPoint"], true, false],
+      paint: { "circle-color": color, "circle-radius": style.pointRadius, "circle-opacity": style.opacity,
+               "circle-stroke-width": 1.5, "circle-stroke-color": "white" } });
+
+    const layerIds = [fillId, lineId, circleId];
+
+    try {
+      const coords = [];
+      (geojson.features || []).forEach(f => {
+        if (!f.geometry) return;
+        const flatten = c => Array.isArray(c[0]) ? c.forEach(flatten) : coords.push(c);
+        flatten(f.geometry.coordinates || []);
+      });
+      if (coords.length) {
+        const lngs = coords.map(c => c[0]), lats = coords.map(c => c[1]);
+        map.fitBounds(
+          [[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]],
+          { padding: 60, duration: 800, maxZoom: 16 }
         );
       }
-    }
-  } catch (error) {
-    console.error(error);
-    setStatus(error.message || "Unable to initialize viewer.", "error");
-  }
-}
+    } catch (_) {}
 
-async function discoverEntries(config) {
-  let repoContext = null;
-  let repoError = null;
+    const layer = { id, name, type: "geojson", visible: true, sourceId, layerIds, sublayerCount: featureCount, sublayerNames: [], style, _geojsonData: geojson };
+    layers.push(layer);
+    renderLayers();
+    hideLoading();
+    updateDashboard();
+    switchTab("layers");
 
-  try {
-    repoContext = await resolveRepoContext(config);
-  } catch (error) {
-    repoError = error;
-  }
-
-  if (repoContext) {
-    try {
-      const entries = await discoverFilesFromGitHub(repoContext, config.dataRoot);
-      return {
-        entries,
-        repoContext,
-        source: "github-api",
-      };
-    } catch (error) {
-      repoError = error;
-    }
-  }
-
-  const directoryEntries = await discoverFilesFromDirectoryListing(config.dataRoot);
-  if (directoryEntries.length > 0) {
-    return {
-      entries: directoryEntries,
-      repoContext: null,
-      source: "directory-index",
-    };
-  }
-
-  if (repoError && repoContext) {
-    throw repoError;
-  }
-
-  if (window.location.protocol === "file:") {
-    throw new Error(
-      "index.html is opened with file://. Use a local web server (for example: python3 -m http.server) or open your GitHub Pages URL."
-    );
-  }
-
-  if (repoError) {
-    throw new Error(
-      `${repoError.message} Local fallback also found no files in "${config.dataRoot}/".`
-    );
-  }
-
-  throw new Error(`No supported files were discovered in "${config.dataRoot}/".`);
-}
-
-function createMap() {
-  const map = L.map("map", { preferCanvas: true });
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 20,
-    attribution: "&copy; OpenStreetMap contributors",
-  }).addTo(map);
-  map.setView([20, 0], 2);
-  return map;
-}
-
-function bindControls() {
-  const loadAllButton = document.getElementById("load-all");
-  const zoomButton = document.getElementById("zoom-loaded");
-  const clearButton = document.getElementById("clear-map");
-
-  loadAllButton.addEventListener("click", () => {
-    const toLoad = state.entries.filter((entry) => entry.status !== "loaded");
-    if (toLoad.length === 0) {
-      setStatus("All discovered files are already loaded.", "ok");
-      return;
-    }
-    void loadEntries(toLoad, true);
-  });
-
-  zoomButton.addEventListener("click", () => {
-    if (!zoomToLoadedLayers()) {
-      setStatus("Load at least one layer first.");
-    }
-  });
-
-  clearButton.addEventListener("click", () => {
-    clearAllLayers();
-    setStatus("Cleared all map layers.");
-  });
-}
-
-function readConfig() {
-  const userConfig =
-    typeof window.GEO_VIEWER_CONFIG === "object" && window.GEO_VIEWER_CONFIG !== null
-      ? window.GEO_VIEWER_CONFIG
-      : {};
-
-  const config = {
-    ...CONFIG_DEFAULTS,
-    ...userConfig,
-  };
-
-  config.dataRoot = normalizeDataRoot(config.dataRoot);
-  return config;
-}
-
-function normalizeDataRoot(dataRoot) {
-  const normalized = String(dataRoot || "data").replace(/^\/+|\/+$/g, "");
-  return normalized || "data";
-}
-
-async function resolveRepoContext(config) {
-  const repoInfo = config.repo ? parseRepoString(config.repo) : inferRepoFromLocation();
-  const branch = config.branch || (await fetchDefaultBranch(repoInfo.owner, repoInfo.repo));
-  return { ...repoInfo, branch };
-}
-
-function parseRepoString(repo) {
-  const parts = String(repo).split("/").filter(Boolean);
-  if (parts.length !== 2) {
-    throw new Error('Invalid "repo" config. Use the format "owner/repo".');
-  }
-  return { owner: parts[0], repo: parts[1] };
-}
-
-function inferRepoFromLocation() {
-  const host = window.location.hostname.toLowerCase();
-  if (!host.endsWith(".github.io")) {
-    throw new Error(
-      'Cannot infer repository from this domain. Set window.GEO_VIEWER_CONFIG.repo = "owner/repo".'
-    );
-  }
-
-  const owner = host.replace(/\.github\.io$/, "");
-  const pathSegments = window.location.pathname.split("/").filter(Boolean);
-  const repo = pathSegments.length > 0 ? decodeURIComponent(pathSegments[0]) : `${owner}.github.io`;
-  return { owner, repo };
-}
-
-async function fetchDefaultBranch(owner, repo) {
-  const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
-  const data = await fetchGitHubJson(url);
-  if (!data.default_branch) {
-    throw new Error("GitHub API response did not include a default branch.");
-  }
-  return data.default_branch;
-}
-
-async function discoverFilesFromGitHub(repoContext, dataRoot) {
-  const { owner, repo, branch } = repoContext;
-  const url =
-    `https://api.github.com/repos/${encodeURIComponent(owner)}` +
-    `/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`;
-  const data = await fetchGitHubJson(url);
-  if (!Array.isArray(data.tree)) {
-    throw new Error("GitHub API did not return a repository tree.");
-  }
-
-  const prefix = `${dataRoot}/`;
-
-  return data.tree
-    .filter((node) => node.type === "blob")
-    .filter((node) => node.path.startsWith(prefix))
-    .map((node) => toEntry(node.path, dataRoot, node.size))
-    .filter(Boolean)
-    .sort((a, b) => a.path.localeCompare(b.path));
-}
-
-async function discoverFilesFromDirectoryListing(dataRoot) {
-  try {
-    const response = await fetch(toDataRootUrl(dataRoot), { cache: "no-store" });
-    if (!response.ok) {
-      return [];
-    }
-
-    const html = await response.text();
-    const parser = new DOMParser();
-    const documentNode = parser.parseFromString(html, "text/html");
-    const links = Array.from(documentNode.querySelectorAll("a[href]"));
-
-    const entries = [];
-    const seen = new Set();
-    for (const link of links) {
-      const href = (link.getAttribute("href") || "").trim();
-      const fileName = hrefToFileName(href);
-      if (!fileName) {
-        continue;
-      }
-
-      const entry = toEntry(`${dataRoot}/${fileName}`, dataRoot, 0);
-      if (!entry || seen.has(entry.path)) {
-        continue;
-      }
-
-      seen.add(entry.path);
-      entries.push(entry);
-    }
-
-    return entries.sort((a, b) => a.path.localeCompare(b.path));
-  } catch {
-    return [];
-  }
-}
-
-function toDataRootUrl(dataRoot) {
-  const encoded = dataRoot
-    .split("/")
-    .filter(Boolean)
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-  return `./${encoded}/`;
-}
-
-function hrefToFileName(href) {
-  if (!href || href.startsWith("#") || href.startsWith("?") || href.startsWith("..")) {
-    return null;
-  }
-  if (href.startsWith("/") || href.startsWith("//")) {
-    return null;
-  }
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href)) {
-    return null;
-  }
-
-  const cleanHref = href.split("#")[0].split("?")[0];
-  let decoded;
-  try {
-    decoded = decodeURIComponent(cleanHref);
-  } catch {
-    return null;
-  }
-  if (!decoded || decoded.endsWith("/")) {
-    return null;
-  }
-
-  const name = decoded.split("/").filter(Boolean).pop();
-  if (!name || name === ".gitkeep") {
-    return null;
-  }
-
-  return name;
-}
-
-function toEntry(path, dataRoot, size) {
-  const normalizedPath = normalizeDataPath(path, dataRoot);
-  if (!normalizedPath) {
-    return null;
-  }
-
-  const kind = detectKind(normalizedPath);
-  if (!kind) {
-    return null;
-  }
-
-  const displayPrefix = `${dataRoot}/`;
-
-  return {
-    path: normalizedPath,
-    displayPath: normalizedPath.startsWith(displayPrefix)
-      ? normalizedPath.slice(displayPrefix.length)
-      : normalizedPath,
-    kind,
-    ext: getExtension(normalizedPath),
-    size: Number.isFinite(size) ? size : 0,
-    status: "idle",
-    message: "",
-    layer: null,
-    row: null,
-    button: null,
-    meta: null,
-  };
-}
-
-function normalizeDataPath(path, dataRoot) {
-  const raw = String(path || "")
-    .trim()
-    .replace(/\\/g, "/");
-  if (!raw || raw.includes("..")) {
-    return null;
-  }
-
-  const withoutLeadingSlash = raw.replace(/^\/+/, "");
-  const withRoot = withoutLeadingSlash.startsWith(`${dataRoot}/`)
-    ? withoutLeadingSlash
-    : `${dataRoot}/${withoutLeadingSlash}`;
-
-  const compactPath = withRoot.split("/").filter(Boolean).join("/");
-  return compactPath.startsWith(`${dataRoot}/`) ? compactPath : null;
-}
-
-function detectKind(path) {
-  const ext = getExtension(path);
-  if (VECTOR_EXTENSIONS.has(ext)) {
-    return "vector";
-  }
-  if (RASTER_EXTENSIONS.has(ext)) {
-    return "raster";
-  }
-  return null;
-}
-
-function getExtension(path) {
-  const lastDot = path.lastIndexOf(".");
-  return lastDot === -1 ? "" : path.slice(lastDot + 1).toLowerCase();
-}
-
-async function fetchGitHubJson(url) {
-  const response = await fetch(url, {
-    headers: {
-      Accept: "application/vnd.github+json",
-    },
-  });
-
-  if (!response.ok) {
-    const limitRemaining = response.headers.get("x-ratelimit-remaining");
-    const resetAt = response.headers.get("x-ratelimit-reset");
-    if (response.status === 403 && limitRemaining === "0" && resetAt) {
-      const resetDate = new Date(Number(resetAt) * 1000);
-      throw new Error(`GitHub API rate limit reached. Try again after ${resetDate.toLocaleString()}.`);
-    }
-
-    throw new Error(`GitHub API request failed (${response.status} ${response.statusText}).`);
-  }
-
-  return response.json();
-}
-
-function renderRepoMeta(repoContext, dataRoot, source) {
-  const container = document.getElementById("repo-meta");
-  const lines = [];
-
-  if (repoContext) {
-    lines.push(`Repo: ${repoContext.owner}/${repoContext.repo}`);
-    lines.push(`Branch: ${repoContext.branch}`);
-  } else {
-    lines.push("Repo: local preview / unknown");
-  }
-
-  lines.push(`Data folder: ${dataRoot}/`);
-  lines.push(`Discovery: ${formatDiscoverySource(source)}`);
-
-  container.textContent = lines.join("\n");
-}
-
-function formatDiscoverySource(source) {
-  if (source === "github-api") {
-    return "GitHub API";
-  }
-  if (source === "directory-index") {
-    return "Directory index";
-  }
-  return "Unknown";
-}
-
-function renderFileList(entries) {
-  const list = document.getElementById("file-list");
-  list.innerHTML = "";
-
-  for (const entry of entries) {
-    const row = document.createElement("li");
-    row.className = "file-row";
-
-    const main = document.createElement("div");
-    main.className = "file-main";
-
-    const name = document.createElement("p");
-    name.className = "file-name";
-    name.textContent = entry.displayPath;
-
-    const badge = document.createElement("span");
-    badge.className = `badge ${entry.kind}`;
-    badge.textContent = entry.kind;
-    name.appendChild(document.createTextNode(" "));
-    name.appendChild(badge);
-
-    const meta = document.createElement("p");
-    meta.className = "file-meta";
-    meta.textContent = `${entry.ext.toUpperCase()} | ${formatBytes(entry.size)} | not loaded`;
-
-    main.append(name, meta);
-
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = "Load";
-    button.addEventListener("click", () => {
-      void toggleEntry(entry);
+    [fillId, circleId].forEach(lid => {
+      map.on("click", lid, e => handleFeatureClick(e, name, lid));
+      map.on("mouseenter", lid, () => { map.getCanvas().style.cursor = "pointer"; });
+      map.on("mouseleave", lid, () => { map.getCanvas().style.cursor = ""; });
     });
-
-    row.append(main, button);
-    list.appendChild(row);
-
-    entry.row = row;
-    entry.button = button;
-    entry.meta = meta;
+  } catch (err) {
+    console.error(err);
+    showError(`Failed to load "${name}": ${err.message}`);
   }
 }
 
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) {
-    return "0 B";
-  }
-  const units = ["B", "KB", "MB", "GB"];
-  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / 1024 ** exponent;
-  return `${value.toFixed(value >= 10 || exponent === 0 ? 0 : 1)} ${units[exponent]}`;
-}
-
-async function toggleEntry(entry) {
-  if (entry.status === "loading") {
-    return;
-  }
-  if (entry.status === "loaded") {
-    unloadEntry(entry);
-    return;
-  }
-  await loadEntry(entry, true);
-}
-
-async function loadEntries(entries, zoomAtEnd) {
-  let loadedCount = 0;
-  for (const entry of entries) {
-    if (entry.status === "loaded") {
-      continue;
-    }
-
-    try {
-      await loadEntry(entry, false);
-      loadedCount += 1;
-    } catch (error) {
-      console.error(error);
-    }
-  }
-
-  if (loadedCount > 0 && zoomAtEnd) {
-    zoomToLoadedLayers();
-    setStatus(`Loaded ${loadedCount} layer(s).`, "ok");
-  } else if (loadedCount === 0) {
-    setStatus("No additional layers were loaded.");
-  }
-}
-
-async function loadEntry(entry, zoomToLayer) {
-  setEntryState(entry, "loading", "loading...");
-
-  try {
-    const layer = await buildLayer(entry);
-    layer.addTo(state.map);
-    entry.layer = layer;
-    setEntryState(entry, "loaded", "loaded");
-
-    if (zoomToLayer) {
-      zoomToLayerBounds(layer);
-    }
-  } catch (error) {
-    const message = error?.message || "unable to parse this file";
-    setEntryState(entry, "error", message);
-    setStatus(`Failed to load ${entry.displayPath}: ${message}`, "error");
-    throw error;
-  }
-}
-
-function unloadEntry(entry) {
-  if (entry.layer) {
-    state.map.removeLayer(entry.layer);
-    entry.layer = null;
-  }
-  setEntryState(entry, "idle", "not loaded");
-}
-
-function clearAllLayers() {
-  for (const entry of state.entries) {
-    if (entry.layer) {
-      state.map.removeLayer(entry.layer);
-      entry.layer = null;
-    }
-    setEntryState(entry, "idle", "not loaded");
-  }
-}
-
-function zoomToLoadedLayers() {
-  const bounds = L.latLngBounds([]);
-  let hasBounds = false;
-
-  for (const entry of state.entries) {
-    if (!entry.layer) {
-      continue;
-    }
-    const layerBounds = getLayerBounds(entry.layer);
-    if (!layerBounds || !layerBounds.isValid()) {
-      continue;
-    }
-    if (!hasBounds) {
-      bounds.extend(layerBounds);
-      hasBounds = true;
-    } else {
-      bounds.extend(layerBounds);
-    }
-  }
-
-  if (!hasBounds || !bounds.isValid()) {
-    return false;
-  }
-
-  state.map.fitBounds(bounds.pad(0.12));
-  return true;
-}
-
-function zoomToLayerBounds(layer) {
-  const bounds = getLayerBounds(layer);
-  if (!bounds || !bounds.isValid()) {
-    return;
-  }
-  state.map.fitBounds(bounds.pad(0.12));
-}
-
-function getLayerBounds(layer) {
-  if (!layer || typeof layer.getBounds !== "function") {
-    return null;
-  }
-  const bounds = layer.getBounds();
-  return bounds && typeof bounds.isValid === "function" ? bounds : null;
-}
-
-async function buildLayer(entry) {
-  if (entry.kind === "raster") {
-    return loadRaster(entry);
-  }
-  return loadVector(entry);
-}
-
-async function loadVector(entry) {
-  const ext = entry.ext;
-  if (isGeoJsonPath(entry.path)) {
-    const geojson = await fetchFileJson(entry.path);
-    return createVectorLayer(geojson, entry.path);
-  }
-
-  if (ext === "json") {
-    const json = await fetchFileJson(entry.path);
-    if (json?.type === "Topology") {
-      return createVectorLayer(topojsonToGeoJson(json), entry.path);
-    }
-    return createVectorLayer(json, entry.path);
-  }
-
-  if (ext === "topojson") {
-    const topology = await fetchFileJson(entry.path);
-    return createVectorLayer(topojsonToGeoJson(topology), entry.path);
-  }
-
-  if (ext === "zip") {
-    if (typeof window.shp !== "function") {
-      throw new Error("Shapefile parser is unavailable.");
-    }
-    const data = await fetchFileArrayBuffer(entry.path);
-    const shpResult = await window.shp(data);
-    return createVectorLayer(normalizeShapefileResult(shpResult), entry.path);
-  }
-
-  if (["kml", "gpx", "csv", "wkt"].includes(ext)) {
-    return loadOmnivoreLayer(ext, toFileUrl(entry.path), entry.path);
-  }
-
-  throw new Error(`Unsupported vector format: .${ext}`);
-}
-
-function isGeoJsonPath(path) {
-  const lowerPath = path.toLowerCase();
-  return lowerPath.endsWith(".geojson") || lowerPath.endsWith(".geo.json");
-}
-
-function createVectorLayer(geojson, colorSeed) {
-  const color = colorForText(colorSeed);
-  return L.geoJSON(geojson, {
-    style: () => ({
-      color,
-      weight: 2,
-      opacity: 0.95,
-      fillColor: color,
-      fillOpacity: 0.26,
-    }),
-    pointToLayer: (_feature, latlng) =>
-      L.circleMarker(latlng, {
-        radius: 5,
-        color,
-        weight: 1,
-        fillColor: color,
-        fillOpacity: 0.8,
-      }),
-    onEachFeature: (feature, layer) => {
-      const popupHtml = buildFeaturePopup(feature.properties);
-      if (popupHtml) {
-        layer.bindPopup(popupHtml, { maxHeight: 260 });
-      }
-    },
-  });
-}
-
-function topojsonToGeoJson(topology) {
-  if (!window.topojson || typeof window.topojson.feature !== "function") {
-    throw new Error("TopoJSON client is unavailable.");
-  }
-  if (!topology || topology.type !== "Topology" || typeof topology.objects !== "object") {
-    throw new Error("Invalid TopoJSON file.");
-  }
-
-  const features = [];
-  for (const [objectName, objectValue] of Object.entries(topology.objects)) {
-    const featureLike = window.topojson.feature(topology, objectValue);
-    if (featureLike.type === "FeatureCollection") {
-      for (const feature of featureLike.features) {
-        features.push(withLayerProperty(feature, objectName));
-      }
-    } else if (featureLike.type === "Feature") {
-      features.push(withLayerProperty(featureLike, objectName));
-    }
-  }
-
-  return {
-    type: "FeatureCollection",
-    features,
-  };
-}
-
-function withLayerProperty(feature, objectName) {
-  return {
-    ...feature,
-    properties: {
-      _layer: objectName,
-      ...(feature.properties || {}),
-    },
-  };
-}
-
-function normalizeShapefileResult(input) {
-  const features = [];
-
-  const pushFeatureLike = (value, layerName) => {
-    if (!value) {
-      return;
-    }
-
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        pushFeatureLike(item, layerName);
-      }
-      return;
-    }
-
-    if (value.type === "FeatureCollection" && Array.isArray(value.features)) {
-      for (const feature of value.features) {
-        pushFeatureLike(feature, layerName);
-      }
-      return;
-    }
-
-    if (value.type === "Feature" && value.geometry) {
-      features.push({
-        ...value,
-        properties: {
-          ...(layerName ? { _layer: layerName } : {}),
-          ...(value.properties || {}),
-        },
-      });
-      return;
-    }
-
-    if (value.type && value.coordinates) {
-      features.push({
-        type: "Feature",
-        geometry: value,
-        properties: layerName ? { _layer: layerName } : {},
-      });
-      return;
-    }
-
-    if (typeof value === "object") {
-      for (const [nestedName, nestedValue] of Object.entries(value)) {
-        pushFeatureLike(nestedValue, nestedName);
-      }
-    }
-  };
-
-  pushFeatureLike(input, "");
-
-  return {
-    type: "FeatureCollection",
-    features,
-  };
-}
-
-function loadOmnivoreLayer(loaderName, url, colorSeed) {
-  if (!window.omnivore || typeof window.omnivore[loaderName] !== "function") {
-    throw new Error("Vector parser is unavailable for this format.");
-  }
-
-  return new Promise((resolve, reject) => {
-    const layer = createVectorLayer(null, colorSeed);
-    const parser = window.omnivore[loaderName](url, null, layer);
-    parser.on("ready", () => resolve(parser));
-    parser.on("error", (event) => {
-      const msg =
-        event?.error?.message ||
-        event?.error?.toString?.() ||
-        `Unable to parse ${loaderName.toUpperCase()} data.`;
-      reject(new Error(msg));
-    });
-  });
-}
-
-async function loadRaster(entry) {
-  const parseGeoRaster = window.parseGeoraster || window.GeoRaster;
-  if (typeof parseGeoRaster !== "function" || typeof window.GeoRasterLayer !== "function") {
-    throw new Error("GeoTIFF parser libraries are unavailable.");
-  }
-
-  const data = await fetchFileArrayBuffer(entry.path);
-  const georaster = await parseGeoRaster(data);
-
-  const layerOptions = {
-    georaster,
-    opacity: 0.8,
-    resolution: 256,
-  };
-  const colorFn = buildSingleBandColorFn(georaster);
-  if (colorFn) {
-    layerOptions.pixelValuesToColorFn = colorFn;
-  }
-
-  return new window.GeoRasterLayer(layerOptions);
-}
-
-function buildSingleBandColorFn(georaster) {
-  if (!georaster || Number(georaster.numberOfRasters) !== 1) {
-    return null;
-  }
-
-  const min = georaster.mins?.[0];
-  const max = georaster.maxs?.[0];
-  if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) {
-    return null;
-  }
-
-  const noDataValue = georaster.noDataValue;
-
-  return (values) => {
-    if (!Array.isArray(values) || values.length === 0) {
-      return null;
-    }
-    const value = values[0];
-    if (!Number.isFinite(value) || value === noDataValue) {
-      return null;
-    }
-
-    const normalized = clamp((value - min) / (max - min), 0, 1);
-    const r = Math.round(25 + 230 * normalized);
-    const g = Math.round(95 + 120 * normalized);
-    const b = Math.round(190 - 170 * normalized);
-    return `rgba(${r}, ${g}, ${b}, 0.82)`;
-  };
-}
-
-function clamp(value, min, max) {
-  return Math.min(Math.max(value, min), max);
-}
-
-async function fetchFileJson(path) {
-  const response = await fetch(toFileUrl(path), { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} while fetching ${path}`);
-  }
-  return response.json();
-}
-
-async function fetchFileArrayBuffer(path) {
-  const response = await fetch(toFileUrl(path), { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} while fetching ${path}`);
-  }
-  return response.arrayBuffer();
-}
-
-function toFileUrl(path) {
-  if (path.includes("..")) {
-    throw new Error("Invalid path segment.");
-  }
-  const encoded = path
-    .split("/")
-    .filter(Boolean)
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-  return `./${encoded}`;
-}
-
-function setEntryState(entry, stateName, message) {
-  entry.status = stateName;
-  entry.message = message;
-
-  entry.row.classList.remove("loaded", "error");
-  entry.button.disabled = false;
-
-  if (stateName === "loading") {
-    entry.button.disabled = true;
-    entry.button.textContent = "Loading...";
-  } else if (stateName === "loaded") {
-    entry.row.classList.add("loaded");
-    entry.button.textContent = "Unload";
-  } else if (stateName === "error") {
-    entry.row.classList.add("error");
-    entry.button.textContent = "Retry";
-  } else {
-    entry.button.textContent = "Load";
-  }
-
-  entry.meta.textContent = `${entry.ext.toUpperCase()} | ${formatBytes(entry.size)} | ${message}`;
-}
-
-function setStatus(message, tone = "neutral") {
-  const status = document.getElementById("status");
-  status.textContent = message;
-  status.classList.remove("error", "ok");
-  if (tone === "error") {
-    status.classList.add("error");
-  }
-  if (tone === "ok") {
-    status.classList.add("ok");
-  }
-}
-
-function colorForText(text) {
-  let hash = 0;
-  for (let i = 0; i < text.length; i += 1) {
-    hash = text.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  const hue = Math.abs(hash) % 360;
-  return `hsl(${hue} 62% 42%)`;
-}
-
-function buildFeaturePopup(properties) {
-  if (!properties || typeof properties !== "object") {
-    return "";
-  }
-
-  const rows = Object.entries(properties).slice(0, 12);
-  if (rows.length === 0) {
-    return "";
-  }
-
-  const body = rows
-    .map(([key, value]) => {
-      const safeKey = escapeHtml(key);
-      const safeValue = escapeHtml(formatPropertyValue(value));
-      return `<tr><th>${safeKey}</th><td>${safeValue}</td></tr>`;
-    })
-    .join("");
-
-  const note =
-    Object.keys(properties).length > rows.length
-      ? `<p><em>Showing first ${rows.length} properties.</em></p>`
-      : "";
-
-  return `<table class="popup-table">${body}</table>${note}`;
-}
-
-function formatPropertyValue(value) {
-  if (value === null || value === undefined) {
-    return "";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  try {
-    return JSON.stringify(value).slice(0, 240);
-  } catch {
-    return String(value);
-  }
-}
-
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (character) => {
-    switch (character) {
-      case "&":
-        return "&amp;";
-      case "<":
-        return "&lt;";
-      case ">":
-        return "&gt;";
-      case '"':
-        return "&quot;";
-      case "'":
-        return "&#39;";
-      default:
-        return character;
-    }
-  });
-}
+// ── Country highlight layers ───────────────────────────────────────────────
+map.on("load", () => {
+  map.addSource("country-highlight", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  map.addLayer({ id: "country-highlight-fill", type: "fill", source: "country-highlight",
+    paint: { "fill-color": "#1a6fba", "fill-opacity": 0.06 } });
+  map.addLayer({ id: "country-highlight-line", type: "line", source: "country-highlight",
+    paint: { "line-color": "#1a6fba", "line-width": 2, "line-opacity": 0.7,
+             "line-dasharray": [3, 2] } });
+});

@@ -1,81 +1,92 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Raster Viewer</title>
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H"
-      crossorigin="anonymous"
-    />
-    <link rel="stylesheet" href="./styles.css" />
-  </head>
-  <body>
-    <div class="layout">
-      <aside class="sidebar">
-        <h1>Raster + Vector Viewer</h1>
-        <p class="hint">
-          Push geospatial files to <code>data/</code> in this repo, then refresh this page.
-        </p>
-        <div id="repo-meta" class="meta"></div>
-        <div class="controls">
-          <button id="load-all" type="button">Load All</button>
-          <button id="zoom-loaded" type="button">Zoom Loaded</button>
-          <button id="clear-map" type="button" class="ghost">Clear Map</button>
-        </div>
-        <ul id="file-list" class="file-list"></ul>
-        <p id="status" class="status" aria-live="polite"></p>
-      </aside>
-      <main class="map-wrap">
-        <div id="map" role="region" aria-label="Map"></div>
-      </main>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GIS Viewer</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<link rel="stylesheet" href="./styles.css">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js" defer></script>
+<script src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js" defer></script>
+<script src="./app.js" defer></script>
+</head>
+<body>
+
+<div id="app">
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <h1>GIS Viewer</h1>
+      <div class="subtitle">Anthony Burgard</div>
     </div>
 
-    <script>
-      window.GEO_VIEWER_CONFIG = {
-        repo: null,
-        branch: null,
-        dataRoot: "data",
-      };
-    </script>
-    <script
-      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-      integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"
-      crossorigin="anonymous"
-      defer
-    ></script>
-    <script
-      src="https://unpkg.com/leaflet-omnivore@0.3.4/leaflet-omnivore.min.js"
-      integrity="sha384-iSbZ0u+krSsBvNi0nBcb2hAdkZkoY5HVYY/bPow5MvY9yWGAmXSpZJ3rt2Run9rK"
-      crossorigin="anonymous"
-      defer
-    ></script>
-    <script
-      src="https://unpkg.com/georaster@1.6.0/dist/georaster.browser.bundle.min.js"
-      integrity="sha384-k/E847ELHPuDVPWoArQHQe5LUD8YSFwxlUaH63fF618o/Y0Gnu4FQ1xjuL280spp"
-      crossorigin="anonymous"
-      defer
-    ></script>
-    <script
-      src="https://unpkg.com/georaster-layer-for-leaflet@4.1.2/dist/v3/webpack/bundle/georaster-layer-for-leaflet.min.js"
-      integrity="sha384-sXMU6o9L7Id0sHhKXTqvWUlKNHnQYz4oa4eCeNk61Cf7UY8NyK1G7A3g/mF4nBPO"
-      crossorigin="anonymous"
-      defer
-    ></script>
-    <script
-      src="https://unpkg.com/topojson-client@3.1.0/dist/topojson-client.min.js"
-      integrity="sha384-Ukv1p/xTma6P4/2bY5KzWBw+ydSpXmhCMtyciIQVDJ1RmOxtCYNMF1uXT9T63H67"
-      crossorigin="anonymous"
-      defer
-    ></script>
-    <script
-      src="https://unpkg.com/shpjs@6.2.0/dist/shp.js"
-      integrity="sha384-H+FfmRuvwpUgbk57oaE8X8JrkO8eMkd0Hjfd5zouea2lCSZdbjSBKTPqzBNWdIDE"
-      crossorigin="anonymous"
-      defer
-    ></script>
-    <script src="./app.js" defer></script>
-  </body>
+    <div id="tab-bar">
+      <button class="tab-btn active" data-tab="viewer">Viewer</button>
+      <button class="tab-btn" data-tab="layers">Layers</button>
+    </div>
+
+    <!-- Viewer tab -->
+    <div class="tab-pane active" id="tab-viewer">
+      <div id="country-section">
+        <div class="section-label" style="padding-top:10px">Zoom to country</div>
+        <div style="padding:0 16px 10px">
+          <select id="country-select">
+            <option value="">— select country —</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="dashboard-section" style="flex:1;overflow-y:auto">
+        <div class="section-label">Features in view</div>
+        <div id="dashboard-body">
+          <div class="dash-empty">Load a layer to see stats</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Layers tab -->
+    <div class="tab-pane" id="tab-layers">
+      <div id="add-section">
+        <button id="add-layer-btn" class="btn btn-ghost add-layer-btn">
+          <span class="add-layer-icon">⊕</span> Add layer
+        </button>
+        <div id="add-layer-body">
+          <div class="drop-zone" id="drop-zone">
+            <div class="dz-icon">⊕</div>
+            <p><strong>Drop a file</strong><br>.pmtiles · .geojson · .json</p>
+          </div>
+          <input type="file" id="file-input" accept=".pmtiles,.geojson,.json">
+          <div id="url-row">
+            <input id="url-input" type="text" placeholder="https://…file.pmtiles or .geojson" />
+            <button class="btn btn-primary" id="url-load-btn">Load</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="layers-section">
+        <div id="empty-state">No layers loaded.<br>Drop a file or enter a URL above.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="map-wrap">
+    <button id="sidebar-toggle" title="Toggle sidebar">›</button>
+    <div id="map"></div>
+    <div id="coords-bar">
+      <span id="coords-lng">Lng: –</span>
+      <span id="coords-lat">Lat: –</span>
+      <span id="coords-zoom">Zoom: –</span>
+    </div>
+    <div id="feature-panel">
+      <div id="feature-header">
+        <span id="feature-layer-name"></span>
+        <button id="feature-close">×</button>
+      </div>
+      <div id="feature-props"></div>
+    </div>
+    <div id="loading-toast">Loading…</div>
+    <div id="error-toast"></div>
+  </div>
+</div>
+
+</body>
 </html>
