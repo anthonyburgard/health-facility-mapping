@@ -14,8 +14,8 @@ const BASEMAPS = {
 const map = new maplibregl.Map({
   container: "map",
   style: BASEMAPS.positron,
-  center: [0, 20],
-  zoom: 2,
+  center: [100, 15],
+  zoom: 4,
   attributionControl: { compact: true },
 });
 
