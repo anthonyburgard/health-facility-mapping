@@ -615,8 +615,7 @@ async function loadPMTiles(url, name, opts = {}) {
     } else {
       if (sublayerNames.length === 0) sublayerNames = ["_all"];
       sublayerNames.forEach((slName, i) => {
-        const subHue = (i * 47 + 210) % 360;
-        const color = `oklch(55% 0.18 ${subHue})`;
+        const color = hslToHex((i * 47 + 210) % 360, 60, 50);
         const fillId = `${id}_fill_${i}`;
         const lineId = `${id}_line_${i}`;
         const circleId = `${id}_circle_${i}`;
