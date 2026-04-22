@@ -1,3 +1,7 @@
+// ── Pre-computed feature counts ────────────────────────────────────────────
+let featureCounts = null; // { total: {LayerName: n}, byCountry: {CountryName: {LayerName: n}} }
+fetch('./counts.json').then(r => r.json()).then(d => { featureCounts = d; updateDashboard(); }).catch(() => {});
+
 // ── PMTiles protocol registration ──────────────────────────────────────────
 const protocol = new pmtiles.Protocol();
 maplibregl.addProtocol("pmtiles", protocol.tile);
@@ -188,14 +192,60 @@ function updateDashboard() {
     return;
   }
 
+  const visLayers = layers.filter(l => l.visible && l.type !== "raster");
+  const countryName = selectedCountry?.name ?? null;
+  const scope = countryName ? `in ${countryName}` : "total";
+
+  // Use pre-computed counts when available
+  if (featureCounts) {
+    const countSrc = countryName
+      ? (featureCounts.byCountry[countryName] ?? {})
+      : featureCounts.total;
+
+    let grandTotal = 0;
+    const layerRows = visLayers.map(l => {
+      let count = countSrc[l.name] ?? 0;
+
+      // Subtract hidden category counts if categorized + counts available
+      if (l.style?.categorizeBy && l.hiddenCategories?.size > 0 && l.style.catValueCounts) {
+        const prop = l.style.categorizeBy;
+        const catSrc = countryName
+          ? getCatCountsForCountry(l, countryName)
+          : l.style.catValueCounts;
+        l.hiddenCategories.forEach(val => { count -= catSrc[val] ?? 0; });
+        count = Math.max(0, count);
+      }
+
+      grandTotal += count;
+      const shortName = l.name.length > 20 ? l.name.slice(0, 18) + "…" : l.name;
+      let html = `<div class="dash-row">
+        <span class="dash-name" title="${l.name}">${shortName}</span>
+        <span class="dash-count">${count.toLocaleString()}</span>
+      </div>`;
+
+      if (l.style?.categorizeBy && l.style?.categoryColors) {
+        const colorMap = l.style.categoryColors;
+        const hidden = l.hiddenCategories ?? new Set();
+        const pills = Object.entries(colorMap).map(([val, color]) =>
+          `<button class="cat-pill${hidden.has(val) ? " off" : ""}" data-layer="${l.id}" data-val="${val.replace(/"/g, '&quot;')}" style="--pill-color:${color}">${val}</button>`
+        ).join("");
+        html += `<div class="cat-pills">${pills}</div>`;
+      }
+      return html;
+    }).join("");
+
+    body.innerHTML = `<div class="dash-total">${grandTotal.toLocaleString()}<span class="dash-total-label">${scope}</span></div>${layerRows}`;
+    return;
+  }
+
+  // Fallback: count rendered features (used before counts.json loads)
   const bbox = selectedCountry?.bbox ?? null;
   const mapBounds = map.getBounds();
-
   const inBounds = ([lng, lat]) => bbox
     ? lng >= bbox[0] && lng <= bbox[2] && lat >= bbox[1] && lat <= bbox[3]
     : mapBounds.contains([lng, lat]);
 
-  const layerData = layers.filter(l => l.visible && l.type !== "raster").map(l => {
+  const layerData = visLayers.map(l => {
     let features = [];
     if (l.type === "geojson") {
       const src = map.getSource(l.sourceId);
@@ -211,7 +261,6 @@ function updateDashboard() {
         if (!seen.has(key)) { seen.add(key); features.push(f); }
       });
     }
-    // Exclude hidden categories from count
     if (l.style?.categorizeBy && l.hiddenCategories?.size > 0) {
       const prop = l.style.categorizeBy;
       features = features.filter(f => !l.hiddenCategories.has(String((f.properties ?? {})[prop] ?? "—")));
@@ -220,32 +269,40 @@ function updateDashboard() {
   });
 
   const grandTotal = layerData.reduce((s, { features }) => s + features.length, 0);
-  const scope = selectedCountry ? `in ${selectedCountry.name}` : "in view";
-
-  let html = `<div class="dash-total">
-    ${grandTotal.toLocaleString()}
-    <span class="dash-total-label">${scope}</span>
-  </div>`;
-
+  let html = `<div class="dash-total">${grandTotal.toLocaleString()}<span class="dash-total-label">${scope}</span></div>`;
   layerData.forEach(({ layer: l, features }) => {
-    const count = features.length;
     const shortName = l.name.length > 20 ? l.name.slice(0, 18) + "…" : l.name;
     html += `<div class="dash-row">
       <span class="dash-name" title="${l.name}">${shortName}</span>
-      <span class="dash-count">${count.toLocaleString()}</span>
+      <span class="dash-count">${features.length.toLocaleString()}</span>
     </div>`;
-
     if (l.style?.categorizeBy && l.style?.categoryColors) {
       const colorMap = l.style.categoryColors;
       const hidden = l.hiddenCategories ?? new Set();
       const pills = Object.entries(colorMap).map(([val, color]) =>
-        `<button class="cat-pill${hidden.has(val) ? " off" : ""}" data-layer="${l.id}" data-val="${CSS.escape ? val : val.replace(/"/g, '&quot;')}" style="--pill-color:${color}">${val}</button>`
+        `<button class="cat-pill${hidden.has(val) ? " off" : ""}" data-layer="${l.id}" data-val="${val.replace(/"/g, '&quot;')}" style="--pill-color:${color}">${val}</button>`
       ).join("");
       html += `<div class="cat-pills">${pills}</div>`;
     }
   });
-
   body.innerHTML = html;
+}
+
+function getCatCountsForCountry(layer, countryName) {
+  // Returns per-category counts filtered to a country using layer's raw geojson data
+  if (!layer._geojsonData) return layer.style.catValueCounts || {};
+  const prop = layer.style.categorizeBy;
+  const bbox = COUNTRIES.find(c => c.name === countryName)?.bbox;
+  if (!bbox) return {};
+  const counts = {};
+  (layer._geojsonData.features || []).forEach(f => {
+    const [lng, lat] = f.geometry?.coordinates ?? [];
+    if (lng >= bbox[0] && lng <= bbox[2] && lat >= bbox[1] && lat <= bbox[3]) {
+      const val = String((f.properties ?? {})[prop] ?? "—");
+      counts[val] = (counts[val] || 0) + 1;
+    }
+  });
+  return counts;
 }
 
 document.getElementById("dashboard-body").addEventListener("click", e => {
@@ -266,8 +323,6 @@ function flatCoords(geom) {
   walk(geom.coordinates || []);
   return out;
 }
-
-map.on("moveend", updateDashboard);
 
 // ── Categorization helpers ─────────────────────────────────────────────────
 const CAT_PALETTE = [
@@ -424,6 +479,8 @@ function renderLayers() {
     const isOpen = activeStyleId === l.id;
     const metaText = l.type === 'geojson'
       ? (l.sublayerCount + " feature" + (l.sublayerCount !== 1 ? "s" : ""))
+      : l.type === 'geotiff'
+      ? (l.sublayerCount + " categor" + (l.sublayerCount !== 1 ? "ies" : "y"))
       : (l.sublayerCount ? l.sublayerCount + " sublayer" + (l.sublayerCount>1?"s":"") : "loading…");
 
     let editorRows = '';
@@ -463,6 +520,27 @@ function renderLayers() {
           </div>
           <div class="cat-edit-list">${catRows}</div>`;
       }
+    } else if (l.type === 'geotiff') {
+      const colorMap = l.style.colorMap || {};
+      const hidden = l.hiddenCategories ?? new Set();
+      const catRows = Object.entries(colorMap).map(([val, color]) =>
+        `<div class="cat-edit-row">
+          <input type="color" class="se-color geotiff-color-inp" data-tiffid="${l.id}" data-tiffval="${val}" value="${color}" style="width:28px;height:22px;padding:1px 2px;flex-shrink:0">
+          <span class="cat-label" style="flex:1;font-size:12px">${val}</span>
+          <button class="cat-vis-btn${hidden.has(Number(val)) ? ' off' : ''}" data-tiffid="${l.id}" data-tiffval="${val}" title="Toggle visibility" style="border:none;background:transparent;cursor:pointer;font-size:13px;padding:0 2px;color:var(--muted)">
+            ${hidden.has(Number(val)) ? '○' : '●'}
+          </button>
+        </div>`
+      ).join('');
+      editorRows = `
+        <div class="se-row">
+          <span class="se-label">Opacity</span>
+          <input type="range" class="se-range" data-prop="opacity" data-id="${l.id}" min="0" max="1" step="0.05" value="${s.opacity??0.85}">
+          <span class="se-value">${Math.round((s.opacity??0.85)*100)}%</span>
+        </div>
+        <hr class="se-divider">
+        <div class="se-section-label">Categories</div>
+        <div class="cat-edit-list">${catRows}</div>`;
     } else {
       editorRows = `
         <div class="se-row">
@@ -518,6 +596,19 @@ document.getElementById("layers-section").addEventListener("dblclick", e => {
 });
 
 document.getElementById("layers-section").addEventListener("click", e => {
+  // GeoTIFF category visibility toggle
+  const visBtn = e.target.closest(".cat-vis-btn");
+  if (visBtn) {
+    const layer = layers.find(l => l.id === visBtn.dataset.tiffid);
+    if (!layer) return;
+    const val = Number(visBtn.dataset.tiffval);
+    if (layer.hiddenCategories.has(val)) layer.hiddenCategories.delete(val);
+    else layer.hiddenCategories.add(val);
+    updateGeoTIFFLayer(layer);
+    renderLayers();
+    return;
+  }
+
   if (e.target.closest("[data-action='rename']")) return;
   const el = e.target.closest("[data-action]");
   if (!el) return;
@@ -541,6 +632,16 @@ document.getElementById("layers-section").addEventListener("change", e => {
 });
 
 document.getElementById("layers-section").addEventListener("input", e => {
+  // GeoTIFF per-category color
+  const tiffInp = e.target.closest(".geotiff-color-inp");
+  if (tiffInp) {
+    const layer = layers.find(l => l.id === tiffInp.dataset.tiffid);
+    if (!layer) return;
+    layer.style.colorMap[Number(tiffInp.dataset.tiffval)] = tiffInp.value;
+    updateGeoTIFFLayer(layer);
+    return;
+  }
+
   const catInp = e.target.closest(".cat-color-inp");
   if (catInp) {
     const layer = layers.find(l => l.id === catInp.dataset.catid);
@@ -557,8 +658,13 @@ document.getElementById("layers-section").addEventListener("input", e => {
   const prop = inp.dataset.prop;
   const val = inp.type === "range" ? parseFloat(inp.value) : inp.value;
   layer.style[prop] = val;
-  if (layer.style.categorizeBy) applyCategorization(layer);
-  else applyLayerStyle(layer);
+  if (layer.type === 'geotiff') {
+    if (prop === 'opacity') map.setPaintProperty(layer.layerIds[0], 'raster-opacity', val);
+  } else if (layer.style.categorizeBy) {
+    applyCategorization(layer);
+  } else {
+    applyLayerStyle(layer);
+  }
   const row = inp.closest(".se-row");
   const valEl = row && row.querySelector(".se-value");
   const swatchEl = row && row.querySelector(".se-swatch");
@@ -580,6 +686,7 @@ function toggleLayer(layer) {
 function removeLayer(layer) {
   layer.layerIds.forEach(lid => { if (map.getLayer(lid)) map.removeLayer(lid); });
   if (map.getSource(layer.sourceId)) map.removeSource(layer.sourceId);
+  if (layer._blobUrl) URL.revokeObjectURL(layer._blobUrl);
   layers = layers.filter(l => l.id !== layer.id);
   renderLayers();
   updateDashboard();
@@ -746,9 +853,11 @@ document.getElementById("map-wrap").addEventListener("drop", e => {
 });
 
 function handleFile(file) {
-  const name = file.name.replace(/\.(pmtiles|geojson|json)$/, "");
+  const name = file.name.replace(/\.(pmtiles|geojson|json|tiff?)$/, "");
   if (file.name.endsWith(".pmtiles")) {
     loadPMTiles(URL.createObjectURL(file), name);
+  } else if (file.name.match(/\.tiff?$/i)) {
+    loadGeoTIFF(file, name);
   } else if (file.name.endsWith(".geojson") || file.name.endsWith(".json")) {
     const reader = new FileReader();
     reader.onload = e => {
@@ -759,7 +868,7 @@ function handleFile(file) {
     };
     reader.readAsText(file);
   } else {
-    showError("Unsupported file type. Use .pmtiles, .geojson, or .json");
+    showError("Unsupported file type. Use .pmtiles, .geojson, .json, or .tif/.tiff");
   }
 }
 
@@ -785,6 +894,145 @@ document.getElementById("url-load-btn").addEventListener("click", async () => {
 document.getElementById("url-input").addEventListener("keydown", e => {
   if (e.key === "Enter") document.getElementById("url-load-btn").click();
 });
+
+// ── GeoTIFF helpers ────────────────────────────────────────────────────────
+function hexToRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function renderGeoTIFFCanvas(data, width, height, colorMap, hiddenVals, nodata) {
+  const MAX = 4096;
+  let sw = width, sh = height, scale = 1;
+  if (sw > MAX || sh > MAX) {
+    scale = Math.min(MAX / sw, MAX / sh);
+    sw = Math.round(sw * scale);
+    sh = Math.round(sh * scale);
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = sw;
+  canvas.height = sh;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(sw, sh);
+
+  for (let py = 0; py < sh; py++) {
+    for (let px = 0; px < sw; px++) {
+      const sx = Math.floor(px / scale);
+      const sy = Math.floor(py / scale);
+      const val = data[sy * width + sx];
+      const i4 = (py * sw + px) * 4;
+      if (val === nodata || val === 0 || hiddenVals.has(val)) {
+        img.data[i4 + 3] = 0;
+      } else {
+        const hex = colorMap[val];
+        if (hex) {
+          const [r, g, b] = hexToRgb(hex);
+          img.data[i4] = r; img.data[i4 + 1] = g; img.data[i4 + 2] = b; img.data[i4 + 3] = 255;
+        } else {
+          img.data[i4 + 3] = 0;
+        }
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return canvas;
+}
+
+async function canvasToBlobUrl(canvas) {
+  return new Promise(resolve => canvas.toBlob(b => resolve(URL.createObjectURL(b)), 'image/png'));
+}
+
+async function updateGeoTIFFLayer(layer) {
+  const canvas = renderGeoTIFFCanvas(
+    layer._tiffData, layer._tiffWidth, layer._tiffHeight,
+    layer.style.colorMap, layer.hiddenCategories, layer._nodata
+  );
+  const url = await canvasToBlobUrl(canvas);
+  if (layer._blobUrl) URL.revokeObjectURL(layer._blobUrl);
+  layer._blobUrl = url;
+  map.getSource(layer.sourceId)?.updateImage({ url, coordinates: layer._coordinates });
+}
+
+// ── Load GeoTIFF ───────────────────────────────────────────────────────────
+async function loadGeoTIFF(file, name) {
+  showLoading(`Loading ${name}…`);
+  try {
+    const ab = await file.arrayBuffer();
+    const tiff = await GeoTIFF.fromArrayBuffer(ab);
+    const image = await tiff.getImage();
+
+    const width = image.getWidth();
+    const height = image.getHeight();
+    const bbox = image.getBoundingBox(); // [west, south, east, north] in image CRS
+
+    // Basic CRS sanity check — warn if bounds look projected (not lat/lon)
+    if (Math.abs(bbox[0]) > 180 || Math.abs(bbox[2]) > 180 ||
+        Math.abs(bbox[1]) > 90  || Math.abs(bbox[3]) > 90) {
+      showError(`"${name}" appears to be in a projected CRS. Reproject to WGS84 (EPSG:4326) first.`);
+      return;
+    }
+
+    const rasters = await image.readRasters({ interleave: true });
+    const data = rasters.subarray ? rasters.subarray(0, width * height) : rasters.slice(0, width * height);
+
+    // Detect nodata
+    const nodataStr = image.fileDirectory?.GDAL_NODATA;
+    const nodata = nodataStr != null ? parseFloat(nodataStr) : null;
+
+    // Unique non-null values (cap at 100 for performance)
+    const valSet = new Set();
+    for (let i = 0; i < data.length; i++) {
+      const v = data[i];
+      if (v !== 0 && v !== nodata && !isNaN(v)) { valSet.add(v); if (valSet.size >= 100) break; }
+    }
+    const uniqueVals = [...valSet].sort((a, b) => a - b);
+
+    if (uniqueVals.length === 0) { showError(`"${name}": no valid data values found.`); return; }
+    if (uniqueVals.length > 50) {
+      showError(`"${name}" has ${uniqueVals.length} unique values — too many for categorical display. Reclassify to ≤50 categories first.`);
+      return;
+    }
+
+    // Default color map
+    const colorMap = {};
+    uniqueVals.forEach((v, i) => { colorMap[v] = CAT_PALETTE[i % CAT_PALETTE.length]; });
+
+    const id = `layer_${++layerCounter}`;
+    const sourceId = `src_${id}`;
+    const coordinates = [
+      [bbox[0], bbox[3]], [bbox[2], bbox[3]],
+      [bbox[2], bbox[1]], [bbox[0], bbox[1]],
+    ];
+
+    const hiddenCategories = new Set();
+    const canvas = renderGeoTIFFCanvas(data, width, height, colorMap, hiddenCategories, nodata);
+    const blobUrl = await canvasToBlobUrl(canvas);
+
+    map.addSource(sourceId, { type: 'image', url: blobUrl, coordinates });
+    const rasterId = `${id}_raster`;
+    map.addLayer({ id: rasterId, type: 'raster', source: sourceId, paint: { 'raster-opacity': 0.85 } });
+
+    map.fitBounds([[bbox[0], bbox[1]], [bbox[2], bbox[3]]], { padding: 40, duration: 800 });
+
+    const layer = {
+      id, name, type: 'geotiff', visible: true, sourceId,
+      layerIds: [rasterId], sublayerCount: uniqueVals.length,
+      style: { opacity: 0.85, colorMap },
+      hiddenCategories, _baseFilters: {},
+      _tiffData: data, _tiffWidth: width, _tiffHeight: height,
+      _nodata: nodata, _coordinates: coordinates, _blobUrl: blobUrl,
+    };
+    layers.push(layer);
+    renderLayers();
+    hideLoading();
+    updateDashboard();
+    switchTab('layers');
+  } catch (err) {
+    console.error(err);
+    showError(`Failed to load "${name}": ${err.message}`);
+  }
+}
 
 // ── Load GeoJSON ───────────────────────────────────────────────────────────
 function loadGeoJSON(geojson, name) {
